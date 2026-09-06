@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -38,6 +39,9 @@ from official_agent.tools.client import BackendError
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+# 会话列表排序兜底:agent_threads.created_at 表级 NOT NULL,测试替身可能给 None
+_SORT_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class _SessionState:
@@ -643,3 +647,146 @@ async def get_admin_conversation_detail(
     if row is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return row
+
+
+# ── 会话管理(M6 #115 G1-G3):用户历史会话/回看,管理员按用户查看 ────────────
+
+def _project_messages(raw_messages: list) -> list[dict[str, str]]:
+    """checkpointer 消息 → [{role, content}]:只保留 user/assistant 文本。
+
+    工具调用中间态(tool/system/空内容)不进回看面——原文回看是给「人读对话」,
+    不是调试轨迹(轨迹走 Langfuse)。
+    """
+    out: list[dict[str, str]] = []
+    for m in raw_messages or []:
+        role = getattr(m, "type", None)
+        if role == "human":
+            role = "user"
+        elif role == "ai":
+            role = "assistant"
+        else:
+            continue
+        content = m.content if isinstance(m.content, str) else ""
+        if content:
+            out.append({"role": role, "content": content})
+    return out
+
+
+async def _fetch_transcript(request: Request, thread_id: str) -> list[dict[str, str]]:
+    """读 checkpointer 原文。存储不可用 → 503(显式数据查询 fail-closed,
+    不给「空会话」假象——同 ADR-0005 写路径哲学)。"""
+    checkpointer = getattr(request.app.state, "checkpointer", None)
+    if checkpointer is None:
+        raise HTTPException(status_code=503, detail="记忆存储不可用,稍后重试")
+    state = await checkpointer.aget_state({"configurable": {"thread_id": thread_id}})
+    values = getattr(state, "values", None) or {}
+    return _project_messages(values.get("messages") or [])
+
+
+@router.get("/sessions")
+async def list_my_sessions(
+    auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
+) -> dict[str, Any]:
+    """我的历史会话(G2):agent_threads 按属主列出 + conversation_log 活跃度聚合。"""
+    from official_agent.state.conversation import session_overview
+    from official_agent.state.threads import list_active_threads
+
+    identity, _ = auth
+    user_id = identity.get("user_id")
+    threads = list_active_threads(user_id) if user_id is not None else []
+    overview = session_overview([t.thread_id for t in threads])
+    items = [
+        {
+            "thread_id": t.thread_id,
+            "channel": t.channel,
+            "subject": t.subject,
+            "created_at": t.created_at,
+            **overview.get(
+                t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}
+            ),
+        }
+        for t in threads
+    ]
+    # ISO 时间字符串字典序 = 时间序;str() 兜底混型(测试替身 None/str)
+    items.sort(
+        key=lambda x: str(x["last_at"] or x["created_at"] or ""),
+        reverse=True,
+    )
+    return {"items": items}
+
+
+@router.get("/sessions/{thread_id}/messages")
+async def get_my_session_messages(
+    request: Request,
+    thread_id: str,
+    auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
+) -> dict[str, Any]:
+    """回看自己的会话原文(G2)。SEC-07:resolve_thread 硬校验属主——
+    非属主/已终结/不存在一律 404(不区分,防会话枚举翻看 PII)。"""
+    from official_agent.state.threads import resolve_thread
+
+    identity, _ = auth
+    user_id = identity.get("user_id")
+    if user_id is None or resolve_thread(thread_id, user_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    messages = await _fetch_transcript(request, thread_id)
+    return {"thread_id": thread_id, "messages": messages}
+
+
+@router.get("/admin/sessions")
+async def get_admin_sessions(
+    request: Request,
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """管理员按用户查看会话列表(G3);user_id 缺省 = 全部用户的会话。"""
+    from official_agent.state.conversation import session_overview
+    from official_agent.state.threads import list_active_threads
+
+    user_id_raw = request.query_params.get("user_id")
+    try:
+        user_id = int(user_id_raw) if user_id_raw else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="user_id 必须为整数") from None
+    threads = list_active_threads(user_id)
+    overview = session_overview([t.thread_id for t in threads])
+    items = [
+        {
+            "thread_id": t.thread_id,
+            "owner_user_id": t.owner_user_id,
+            "channel": t.channel,
+            "subject": t.subject,
+            "created_at": t.created_at,
+            **overview.get(
+                t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}
+            ),
+        }
+        for t in threads
+    ]
+    # ISO 时间字符串字典序 = 时间序;str() 兜底混型(测试替身 None/str)
+    items.sort(
+        key=lambda x: str(x["last_at"] or x["created_at"] or ""),
+        reverse=True,
+    )
+    return {"items": items}
+
+
+@router.get("/admin/sessions/{thread_id}/messages")
+async def get_admin_session_messages(
+    request: Request,
+    thread_id: str,
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """管理员回看任意会话原文(G3);不存在 404。已终结会话原文仍可查
+    (status 标注返回),供运营排查——区别于用户侧 resolve_thread 拒绝复活。"""
+    from official_agent.state.threads import get_thread
+
+    rec = get_thread(thread_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    messages = await _fetch_transcript(request, thread_id)
+    return {
+        "thread_id": thread_id,
+        "owner_user_id": rec.owner_user_id,
+        "status": rec.status,
+        "messages": messages,
+    }

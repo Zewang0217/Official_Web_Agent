@@ -319,3 +319,42 @@ def get_conversation(conversation_id: int) -> dict[str, Any] | None:
     tools = result.get("tools")
     result["tools"] = tools if isinstance(tools, list) else []
     return result
+
+
+def session_overview(thread_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """会话级聚合(#115 会话管理):thread_id → {rounds, last_at, preview}。
+
+    preview 取该会话最近一轮的问题首 20 字;无任何落行的会话不出现在结果里
+    (调用方以 agent_threads 记录为准,此处仅补充活跃度)。
+    """
+    if not thread_ids:
+        return {}
+    with _conn() as conn:
+        last_rows = conn.execute(
+            """
+            SELECT DISTINCT ON (thread_id)
+                   thread_id, created_at AS last_at, left(user_message, 20) AS preview
+            FROM agent_conversation_log
+            WHERE thread_id = ANY(%s)
+            ORDER BY thread_id, created_at DESC
+            """,
+            (thread_ids,),
+        ).fetchall()
+        count_rows = conn.execute(
+            """
+            SELECT thread_id, COUNT(*) AS rounds
+            FROM agent_conversation_log
+            WHERE thread_id = ANY(%s)
+            GROUP BY thread_id
+            """,
+            (thread_ids,),
+        ).fetchall()
+    rounds = {r["thread_id"]: r["rounds"] for r in count_rows}
+    out: dict[str, dict[str, Any]] = {}
+    for r in last_rows:
+        out[r["thread_id"]] = {
+            "rounds": rounds.get(r["thread_id"], 0),
+            "last_at": r["last_at"],
+            "preview": r["preview"] or "",
+        }
+    return out
