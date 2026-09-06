@@ -678,9 +678,22 @@ async def _fetch_transcript(request: Request, thread_id: str) -> list[dict[str, 
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is None:
         raise HTTPException(status_code=503, detail="记忆存储不可用,稍后重试")
-    state = await checkpointer.aget_state({"configurable": {"thread_id": thread_id}})
-    values = getattr(state, "values", None) or {}
-    return _project_messages(values.get("messages") or [])
+    raw = await _load_checkpoint_messages(checkpointer, thread_id)
+    return _project_messages(raw)
+
+
+async def _load_checkpoint_messages(checkpointer: Any, thread_id: str) -> list:
+    """按 saver 能力取原文消息:高级 aget_state(values.messages)优先,
+    低层 aget_tuple(checkpoint.channel_values.messages)兜底(联调版本两者只居一)。"""
+    config = {"configurable": {"thread_id": thread_id}}
+    if hasattr(checkpointer, "aget_state"):
+        state = await checkpointer.aget_state(config)
+        values = getattr(state, "values", None) or {}
+        return values.get("messages") or []
+    tp = await checkpointer.aget_tuple(config)
+    checkpoint = getattr(tp, "checkpoint", None) or {}
+    channel_values = checkpoint.get("channel_values") or {}
+    return channel_values.get("messages") or []
 
 
 @router.get("/sessions")
