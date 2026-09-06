@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,28 +21,9 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from official_agent.config import get_settings
+from official_agent.security.pii import mask_pii  # 共享规则表(security/pii.py;re-export 供既有引用)
 
-# PII 确定性规则表(简单版先行,SEC-08 契约对齐后补)。值经测试钉住。
-_MASK_RULES: list[tuple[re.Pattern[str], str]] = [
-    # 手机号(11 位,1 开头):留前 3 后 4
-    (re.compile(r"(?<!\d)(1\d{2})\d{4}(\d{4})(?!\d)"), r"\1****\2"),
-    # 身份证(18 位):留前 4 后 4
-    (re.compile(r"(?<!\d)(\d{4})\d{10}(\d{4})(?!\d)"), r"\1**********\2"),
-    # QQ(5-11 位纯数字,词边界):全掩
-    (re.compile(r"(?<!\d)\d{5,11}(?!\d)"), "*****"),
-]
-
-
-def mask_pii(text: str) -> str:
-    """确定性 PII 脱敏:手机号留前 3 后 4、身份证留前 4 后 4、QQ 全掩。
-
-    规则表先于 SEC-08 契约的简单版;无匹配原样返回。纯数字串(如「2024」
-    年份、会话 id)不受影响——QQ 规则限 5-11 位且词边界。
-    """
-    masked = text
-    for pattern, repl in _MASK_RULES:
-        masked = pattern.sub(repl, masked)
-    return masked
+# PII 确定性规则表已上移 security/pii.py(#115 review P0-3:工具返回层共用)
 
 
 @dataclass(frozen=True)

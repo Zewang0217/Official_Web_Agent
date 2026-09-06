@@ -67,6 +67,9 @@ class _SessionState:
         self.applied_config_fingerprint: str | None = None
         # M6 #114:轮计数(1 起),压缩事件留痕「触发轮」用
         self.turns = 0
+        # review P0-1:同会话并发轮次串行化——_stream_turn 全程持有,
+        # 第二个并发请求按 #90 契约立即回 busy(不入队;单 worker 下即全部防线)
+        self.turn_lock = asyncio.Lock()
 
 
 # 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本 INF-11)。
@@ -161,6 +164,10 @@ async def chat(
     message = (body.get("message") or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
+    if len(message) > _MAX_MESSAGE_CHARS:
+        raise HTTPException(
+            status_code=400, detail=f"消息过长(上限 {_MAX_MESSAGE_CHARS} 字)"
+        )
     session_id = (body.get("session_id") or "").strip() or None
 
     session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
@@ -180,8 +187,13 @@ _ERR_INVALID_REQUEST = "invalid_request"
 _ERR_UNKNOWN = "unknown"
 # 客户端断连中止(CancelledError):非 #90 契约码,运营侧新码——断连轮次留痕专用
 _ERR_DISCONNECTED = "client_disconnected"
+# 同会话并发轮次占用(review P0-1):第二个并发请求立即拒绝,不入队
+_ERR_BUSY = "busy"
 # auth 失效的关键词(get_as_user 失败文案含之;message 判定的最后兜底)。
 _AUTH_FAIL_HINTS = ("令牌", "token", "登录", "JWT")
+# 单条消息长度上限(review P0-2:限流参数归 #56,先收敛单请求滥用面;
+# 超限走 400 invalid_request,前端零改动)
+_MAX_MESSAGE_CHARS = 2000
 
 
 def _error_code(exc: Exception) -> str:
@@ -302,120 +314,130 @@ async def _stream_turn(
     落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
     checkpointer:配置变更后重建 agent 需要(见 _ensure_fresh_agent_config)。
     """
-    # M6 #111 热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
-    _ensure_fresh_agent_config(session, checkpointer)
-    # M6 #114:轮计数(1 起),压缩事件「触发轮」留痕用
-    session.turns += 1
-
-    config = {
-        "configurable": {"thread_id": session.session_id},
-        "callbacks": langfuse_callbacks(),
-    }
-
     def sse(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    # M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)——
-    # 压缩掉早期上下文后身份边界仍在最近窗口;前缀含首轮身份段,
-    # 同 session 内缓存仍命中(身份块小,重注成本可忽略)。
-    first_input = HumanMessage(content=identity_message(session.identity))
-    messages: list = [first_input, HumanMessage(content=message)]
 
-    # 契约 #90:首事件 session(带 created 标记新/续传)
-    yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
-
-    started = time.monotonic()
-    tools_called: list[str] = []
-    reply_chunks: list[str] = []
-    error_code: str | None = None
-    usage_acc: dict[str, int | None] = {  # 跨 model 步累计(#113 MAJOR:ReAct 多步求和)
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_hit_tokens": 0,
-        "cache_miss_tokens": 0,
-    }
-    _last_usage: dict[str, int | None] | None = None
+    # review P0-1:同会话并发轮次串行化——锁被占用时立即回 busy,
+    # 不排队(前端提示「上一条还在回复中」);check/acquire 间无 await,原子。
+    if session.turn_lock.locked():
+        yield sse({"type": "error", "code": _ERR_BUSY, "message": "上一条消息还在回复中,请稍候"})
+        return
+    await session.turn_lock.acquire()
     try:
-        async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
-            {"messages": messages}, config=config, stream_mode=["messages", "updates"]
-        ):
-            if mode == "messages":
-                chunk, _meta = payload
-                if isinstance(chunk, AIMessageChunk) and chunk.content:
-                    # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
-                    text = chunk.content if isinstance(chunk.content, str) else ""
-                    if text:
-                        reply_chunks.append(text)
-                        yield sse({"type": "delta", "role": "assistant", "content": text})
-                # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
-                # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
-                # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
-                # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
-                um = getattr(chunk, "usage_metadata", None)
-                raw_usage = (chunk.response_metadata or {}).get("token_usage")
-                usage_payload = raw_usage if raw_usage else um
-                if um is not None and usage_payload:
-                    extracted = extract_usage(usage_payload)
-                    if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
-                        _last_usage = extracted
-                        for k in usage_acc:
-                            v = extracted.get(k)
-                            cur = usage_acc.get(k) or 0
-                            if v is not None:
-                                usage_acc[k] = cur + v
-            elif mode == "updates":
-                for _ns, node_update in payload.items():
-                    if isinstance(node_update, dict):
-                        for m in node_update.get("messages") or []:
-                            # 工具调用状态(契约 #90:tool 事件,role=tool)
-                            if getattr(m, "tool_calls", None):
-                                for tc in m.tool_calls:
-                                    tools_called.append(tc.get("name") or "")
-                                    yield sse(
-                                        {"type": "tool", "role": "tool", "name": tc.get("name")}
-                                    )
-    except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
-        error_code = _error_code(exc)
-        yield sse({"type": "error", "code": error_code, "message": str(exc)})
-    except asyncio.CancelledError:
-        # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
-        # (partial reply/已调工具不丢失),error_code 记断连中止。
-        error_code = _ERR_DISCONNECTED
+        # M6 #111 热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
+        _ensure_fresh_agent_config(session, checkpointer)
+        # M6 #114:轮计数(1 起),压缩事件「触发轮」留痕用
+        session.turns += 1
 
-    # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
-    # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
-    # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
-    from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
-
-    # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
-    # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
-    compress_event = await _compress_if_needed(session, config, message)
-
-    role = session.identity.get("role") or "unknown"
-    tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
-    p_hash = prefix_hash(load_system_prompt(), tool_names)
-    if any(usage_acc.values()):
-        usage = usage_acc
-    else:
-        usage = {
-            "input_tokens": None,
-            "output_tokens": None,
-            "cache_hit_tokens": None,
-            "cache_miss_tokens": None,
+        config = {
+            "configurable": {"thread_id": session.session_id},
+            "callbacks": langfuse_callbacks(),
         }
-    _log_conversation(
-        session,
-        user_message=message,
-        reply_summary="".join(reply_chunks),
-        tools=tools_called,
-        duration_ms=_elapsed_ms(started),
-        error_code=error_code,
-        usage=usage,
-        prefix_hash=p_hash,
-        compress_event=compress_event,
-    )
-    if error_code is None:
-        yield sse({"type": "done", "session_id": session.session_id})
+
+        # M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)——
+        # 压缩掉早期上下文后身份边界仍在最近窗口;前缀含首轮身份段,
+        # 同 session 内缓存仍命中(身份块小,重注成本可忽略)。
+        first_input = HumanMessage(content=identity_message(session.identity))
+        messages: list = [first_input, HumanMessage(content=message)]
+
+        # 契约 #90:首事件 session(带 created 标记新/续传)
+        yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
+
+        started = time.monotonic()
+        tools_called: list[str] = []
+        reply_chunks: list[str] = []
+        error_code: str | None = None
+        usage_acc: dict[str, int | None] = {  # 跨 model 步累计(#113 MAJOR:ReAct 多步求和)
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 0,
+        }
+        _last_usage: dict[str, int | None] | None = None
+        try:
+            async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
+                {"messages": messages}, config=config, stream_mode=["messages", "updates"]
+            ):
+                if mode == "messages":
+                    chunk, _meta = payload
+                    if isinstance(chunk, AIMessageChunk) and chunk.content:
+                        # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
+                        text = chunk.content if isinstance(chunk.content, str) else ""
+                        if text:
+                            reply_chunks.append(text)
+                            yield sse({"type": "delta", "role": "assistant", "content": text})
+                    # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
+                    # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
+                    # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
+                    # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
+                    um = getattr(chunk, "usage_metadata", None)
+                    raw_usage = (chunk.response_metadata or {}).get("token_usage")
+                    usage_payload = raw_usage if raw_usage else um
+                    if um is not None and usage_payload:
+                        extracted = extract_usage(usage_payload)
+                        if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
+                            _last_usage = extracted
+                            for k in usage_acc:
+                                v = extracted.get(k)
+                                cur = usage_acc.get(k) or 0
+                                if v is not None:
+                                    usage_acc[k] = cur + v
+                elif mode == "updates":
+                    for _ns, node_update in payload.items():
+                        if isinstance(node_update, dict):
+                            for m in node_update.get("messages") or []:
+                                # 工具调用状态(契约 #90:tool 事件,role=tool)
+                                if getattr(m, "tool_calls", None):
+                                    for tc in m.tool_calls:
+                                        tools_called.append(tc.get("name") or "")
+                                        yield sse(
+                                            {"type": "tool", "role": "tool", "name": tc.get("name")}
+                                        )
+        except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
+            error_code = _error_code(exc)
+            yield sse({"type": "error", "code": error_code, "message": str(exc)})
+        except asyncio.CancelledError:
+            # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
+            # (partial reply/已调工具不丢失),error_code 记断连中止。
+            error_code = _ERR_DISCONNECTED
+
+        # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
+        # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
+        # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
+        from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
+
+        # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
+        # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
+        compress_event = await _compress_if_needed(session, config, message)
+
+        role = session.identity.get("role") or "unknown"
+        tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
+        p_hash = prefix_hash(load_system_prompt(), tool_names)
+        if any(usage_acc.values()):
+            usage = usage_acc
+        else:
+            usage = {
+                "input_tokens": None,
+                "output_tokens": None,
+                "cache_hit_tokens": None,
+                "cache_miss_tokens": None,
+            }
+        _log_conversation(
+            session,
+            user_message=message,
+            reply_summary="".join(reply_chunks),
+            tools=tools_called,
+            duration_ms=_elapsed_ms(started),
+            error_code=error_code,
+            usage=usage,
+            prefix_hash=p_hash,
+            compress_event=compress_event,
+        )
+        if error_code is None:
+            yield sse({"type": "done", "session_id": session.session_id})
+    finally:
+        session.turn_lock.release()
 
 
 def _log_conversation(

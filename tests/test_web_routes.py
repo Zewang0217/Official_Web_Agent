@@ -574,3 +574,83 @@ def test_chat_rebuilds_agent_after_config_change(
     ) as resp:
         _sse_events(resp)
     assert len(builds) == 2
+
+
+def test_chat_message_too_long_returns_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review P0-2:单条消息超长 → 400(收敛单请求滥用面;限流参数归 #56)。"""
+    from official_agent.web import routes
+
+    _install_fakes(monkeypatch)
+    long_msg = "长" * (routes._MAX_MESSAGE_CHARS + 1)
+    resp = client.post(
+        "/api/agent/chat", json={"message": long_msg},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 400
+    assert "消息过长" in resp.text
+
+
+def test_stream_turn_busy_when_lock_held(client: TestClient) -> None:
+    """review P0-1:同会话并发轮次——锁被占用 → 立即回 busy,不再进 astream。"""
+    import asyncio
+    import json as jsonlib
+
+    from official_agent.web import routes
+
+    identity = auth_ok_data()
+    calls: list = []
+
+    class _HangAgent:
+        async def astream(self, inp, config=None, **kwargs):  # pragma: 不应被调用
+            calls.append(1)
+            yield "messages", (AIMessage(content="不应出现"), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config):
+            return None
+
+    session = routes._SessionState("web:u7:busyt1", identity, "tok", _HangAgent())
+    session.applied_config_fingerprint = routes._config_fingerprint()
+
+    async def run():
+        async with session.turn_lock:  # 模拟另一轮正在执行
+            gen = routes._stream_turn(session, "hi", False)
+            first = await gen.__anext__()
+            event = jsonlib.loads(first[len("data: "):])
+            assert event["type"] == "error" and event["code"] == "busy"
+            await gen.aclose()
+
+    asyncio.run(run())
+    assert calls == []  # busy 轮未触达模型
+
+
+def test_get_resume_detail_masks_pii_in_payload() -> None:
+    """review P0-3:简历详情返回层就地脱敏——trace 上报的是脱敏后数据。"""
+    import asyncio
+
+    from official_agent.tools import readonly
+
+    class _FakeClient:
+        async def get(self, url):
+            return {
+                "resume": {"resume_id": 1},
+                "fieldValues": [
+                    {"fieldKey": "phone", "fieldValue": "13812345678"},
+                    {"fieldKey": "extra_id", "fieldValue": "310101199001011234"},
+                    {"fieldKey": "intro", "fieldValue": "我的 QQ 是 123456789"},
+                ],
+            }
+
+    readonly.set_backend_client(_FakeClient())
+
+    async def run():
+        return await readonly.get_resume_detail(7, 3)
+
+    result = asyncio.run(run())
+    values = [fv["fieldValue"] for fv in result["fieldValues"]]
+    assert values[0] == "138****5678"
+    assert values[1] == "3101**********1234"
+    assert "123456789" not in values[2]
+    readonly.set_backend_client(None)

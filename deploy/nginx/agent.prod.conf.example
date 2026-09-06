@@ -2,7 +2,8 @@
 # 用法:并入现有官网 nginx 的 server{}(假设①:不另起 nginx 容器),
 #       与 Backend /api 反代、前端静态托管同层。nginx -t && nginx -s reload。
 #
-# 前置(文件顶部 http{} 级,限流预留位 —— SEC-05/#56 定后取消注释并调参):
+# 前置(http{} 级,review P0-2:上线前置启用,保守参数先行;#56/SEC-05 出
+# 参数后再调):
 #   limit_req_zone $binary_remote_addr zone=agent_chat:10m rate=10r/m;
 
 # SSE 三件套(#116 AC):proxy_buffering off + 长超时 + HTTP/1.1。
@@ -22,7 +23,7 @@ location /api/agent/ {
     proxy_send_timeout 3600s;
     chunked_transfer_encoding on;
 
-    # 限流位置预留(SEC-05/#56 定后接入,参数不拍板):
-    # limit_req zone=agent_chat burst=5 nodelay;
-    # limit_req_status 429;
+    # 限流(review P0-2:已按保守参数启用;#56/SEC-05 定后调参)
+    limit_req zone=agent_chat burst=5 nodelay;
+    limit_req_status 429;
 }
