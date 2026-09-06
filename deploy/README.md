@@ -27,6 +27,9 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
 
 注意:
 - 与 Backend 仓库自带 compose **二选一**(共用 `volumes/mysql_data`,同时跑会坏卷)。
+- **重建 build-admin/build-user 后必须重建 web 容器**:`rm -rf` 换了目录 inode,
+  运行中容器的绑定挂载指向旧 inode → nginx 403。修复:
+  `docker compose -f deploy/docker-compose.local.yml up -d --force-recreate admin-web user-web`
 - Agent 密钥经 `env_file: ../.env` 注入,不进镜像(SEC-01)。
 - 本地栈不起 langfuse(fail-open);要观测另起 `docker compose -f ../deploy/langfuse/docker-compose.yml up -d`。
 
