@@ -15,8 +15,10 @@
 name: official-agent-prod
 
 services:
+  # RAG #134:kb_chunks 向量列依赖 pgvector 扩展;镜像换 pgvector(postgres:17
+  # 同底,既有卷直接兼容,首次 KB 操作自动 CREATE EXTENSION)
   agent-pg:
-    image: postgres:17
+    image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${AGENT_PG_PASSWORD:?需在 .env.prod 设置}

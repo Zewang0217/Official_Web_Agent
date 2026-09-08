@@ -199,6 +199,8 @@ def list_sources(
     *, page: int = 1, size: int = 20, kind: str | None = None, keyword: str | None = None
 ) -> dict:
     """分页列表(管理面板数据源)。keyword 匹配标题。返回 {items,total,page,size}。"""
+    page = max(1, page)
+    size = min(max(1, size), 100)  # 钳制:防负 OFFSET / 过大页
     where = ["TRUE"]
     params: list[Any] = []
     if kind in ("normal", "test"):

@@ -59,8 +59,6 @@ def kb_env(monkeypatch):
     # 清理本测试建的数据(按标记前缀)
     import psycopg
 
-    from official_agent.config import get_settings  # noqa: F401
-
     with psycopg.connect(os.environ["KB_TEST_DATABASE_URL"]) as conn:
         conn.execute("DELETE FROM kb_source WHERE updated_by LIKE 'it-%'")
         conn.commit()
@@ -165,3 +163,49 @@ async def test_reingest_updates_chunks_not_duplicates(kb_env) -> None:
             "SELECT count(*) FROM kb_chunks WHERE source_id = %s", (sid,)
         ).fetchone()
         assert n is not None and n[0] == 2
+
+
+async def test_model_change_bumps_version_and_clears_vectors(kb_env) -> None:
+    """换 embedding 模型:旧向量全清+版本 bump+列维度 ALTER(禁混排,#119)。
+
+    评审闸 P1:这是全票风险最高的 DDL 路径(HNSW 索引在列上时 ALTER),
+    实测正确性依赖「同事务先 DELETE 再 ALTER」的顺序,必须有真库守护。
+    """
+    import psycopg
+
+    url = os.environ["KB_TEST_DATABASE_URL"]
+    run = secrets.token_hex(3)
+    sid = await store.ingest_source(
+        SourceInput(
+            title="换代前的条目", type="doc", content_md="ax0 旧内容", updated_by=f"it-{run}"
+        ),
+        embedder=_axis_embedder(),
+    )
+    hits = await store.search("ax0", embedder=_axis_embedder(), top_k=5)
+    assert any(h.source_id == sid for h in hits)
+
+    # 模拟换模型:直接改 meta(制造与配置的 model/dim 不一致)
+    with psycopg.connect(url) as conn:
+        old_version = conn.execute("SELECT version FROM kb_meta WHERE id = 1").fetchone()[0]
+        conn.execute(
+            "UPDATE kb_meta SET embed_model = 'it-other-model', dim = 3 WHERE id = 1"
+        )
+        conn.commit()
+
+    # 下一次写/读触发 ensure:清向量 → 版本 bump → 列 ALTER 回配置维度
+    sid2 = await store.ingest_source(
+        SourceInput(
+            title="换代后的条目", type="doc", content_md="ax0 新内容", updated_by=f"it-{run}"
+        ),
+        embedder=_axis_embedder(),
+    )
+    with psycopg.connect(url) as conn:
+        meta = conn.execute("SELECT version, dim FROM kb_meta WHERE id = 1").fetchone()
+        assert meta[0] == old_version + 1 and meta[1] == DIM
+        stale = conn.execute(
+            "SELECT count(*) FROM kb_chunks WHERE source_id = %s", (sid,)
+        ).fetchone()
+        assert stale[0] == 0  # 旧向量已清,绝不与新模型向量混排
+
+    hits2 = await store.search("ax0", embedder=_axis_embedder(), top_k=5)
+    assert [h.source_id for h in hits2] == [sid2]  # 只有换代后入库的可检索

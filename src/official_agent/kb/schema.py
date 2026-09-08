@@ -111,6 +111,10 @@ def ensure_kb_schema(
             "CREATE INDEX IF NOT EXISTS idx_kb_chunks_hnsw "
             "ON kb_chunks USING hnsw (embedding vector_cosine_ops)"
         )
+        # source 维度索引:FK 不自动建;ingest 的条目级 DELETE 与详情块数走它
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kb_chunks_source ON kb_chunks (source_id)"
+        )
 
     row = conn.execute(
         "SELECT embed_model, dim, version FROM kb_meta WHERE id = 1"

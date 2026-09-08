@@ -49,7 +49,11 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         raise EmbeddingError(f"embedding 端点连不上:{exc}") from exc
     if resp.status_code != 200:
         raise EmbeddingError(f"embedding 端点 HTTP {resp.status_code}:{resp.text[:200]}")
-    items = resp.json().get("data")
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise EmbeddingError(f"embedding 响应非 JSON:{resp.text[:200]}") from exc
+    items = payload.get("data")
     if not isinstance(items, list) or len(items) != len(texts):
         raise EmbeddingError(f"embedding 响应条数不符:期望 {len(texts)}")
     vectors: list[list[float] | None] = [None] * len(texts)
