@@ -6,6 +6,8 @@ agent:monitor 一样走 JWT permission_codes 自校)。
 """
 
 import asyncio
+import contextlib
+import secrets
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -13,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from official_agent.evaluation import runner as eval_runner
 from official_agent.graphs.identity import ResolvedIdentity
-from official_agent.state import evaluation
+from official_agent.state import audit, evaluation
 from official_agent.state import qbank as qbank_store
 from official_agent.web.routes import _authenticate
 
@@ -170,3 +172,193 @@ async def list_question_picks(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询勾选失败,请稍后重试") from exc
     return {"items": picks, "total": len(picks)}
+
+
+# ── B6 评审队列(#124/#128):0 分队列/采纳/改分/驳回 ──────────────────────
+
+
+class AdoptBody(BaseModel):
+    """采纳(AI 参考分或人工改分,以评审本人一票 upsert 后端多人打分)。
+
+    score 必填:采纳 AI 参考总分传回其 total,改分则传人工分——Agent 不
+    帮任何人决定终分。
+    """
+
+    resume_id: int = Field(ge=1)
+    cycle_id: int = Field(ge=1)
+    score: int = Field(ge=0, le=100)
+    version: int | None = None  # 缺省采纳最新版
+
+
+class RejectBody(BaseModel):
+    resume_id: int = Field(ge=1)
+    cycle_id: int = Field(ge=1)
+    version: int | None = None
+
+
+def _require_review_audit():
+    return _require_resume_audit()
+
+
+@router.get("/admin/evaluation/queue")
+async def evaluation_queue(
+    _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    cycle_id: int,
+    queue: str = "all",
+) -> dict[str, Any]:
+    """评审队列:queue=zero → 初筛不过(hard_zero)子队列;all → 全部评分卡。"""
+    if queue not in ("zero", "all"):
+        raise HTTPException(status_code=400, detail="queue 只支持 zero/all")
+
+    def _query() -> list[dict[str, Any]]:
+        with evaluation._conn() as conn:
+            evaluation.ensure_evaluation_tables(conn)
+            where = (
+                "cycle_id = %s AND hard_zero = TRUE"
+                if queue == "zero"
+                else "cycle_id = %s"
+            )
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (resume_id)
+                    resume_id, card_version, status, hard_zero, total, prompt_version, created_at
+                FROM evaluation_scorecard WHERE {where}
+                ORDER BY resume_id, card_version DESC
+                """,
+                (cycle_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    try:
+        items = await asyncio.to_thread(_query)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="查询队列失败,请稍后重试") from exc
+    return {"items": items, "total": len(items), "queue": queue}
+
+
+@router.get("/admin/evaluation/scorecard")
+async def get_scorecard_for_review(
+    identity: Annotated[
+        ResolvedIdentity,
+        Depends(_require_any("interview:evaluate", "resume:audit")),
+    ],
+    resume_id: int,
+    cycle_id: int,
+) -> dict[str, Any]:
+    """单候选评分卡:面试官(interview:evaluate)场景内只读维卡,#128。"""
+    row = await asyncio.to_thread(evaluation.latest_scorecard, resume_id, cycle_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="该候选暂无评分卡")
+    return row
+
+
+@router.post("/admin/evaluation/adopt")
+async def adopt_scorecard(
+    body: AdoptBody,
+    identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """采纳 = 评审本人以自身身份向后端投一票(#124:AI 不占 scorer)。
+
+    成功后才把 Agent 卡置 adopted;后端失败时卡保持 draft 可重试。
+    """
+    from official_agent.tools.client import BackendError
+    from official_agent.tools.readonly import get_backend_client as _gbc
+
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    client = await _gbc()
+    try:
+        await client.put_as_user(
+            f"/api/resumes/{body.resume_id}/score",
+            json={"score": body.score},
+            user_token=token,
+        )
+    except BackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    version = body.version
+    if version is None:
+        row = await asyncio.to_thread(
+            evaluation.latest_scorecard, body.resume_id, body.cycle_id
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="该候选暂无评分卡,无法采纳")
+        version = int(row["card_version"])
+    changed = await asyncio.to_thread(
+        evaluation.set_scorecard_status,
+        body.resume_id,
+        body.cycle_id,
+        version,
+        "adopted",
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="评分卡不存在")
+    with contextlib.suppress(Exception):
+        audit.write_audit(
+            thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
+            acting_user_id=int(identity.get("user_id") or 0),
+            channel="evaluation",
+            agent="evaluation-reviewer",
+            action={
+                "op": "adopt_scorecard",
+                "resume_id": body.resume_id,
+                "cycle_id": body.cycle_id,
+                "version": version,
+                "score": body.score,
+            },
+            decision=f"u{identity.get('user_id')}:adopt",
+            result=f"评审采纳为一票(score={body.score});终分=多人平均",
+        )
+    return {
+        "resume_id": body.resume_id,
+        "cycle_id": body.cycle_id,
+        "version": version,
+        "status": "adopted",
+        "score": body.score,
+    }
+
+
+@router.post("/admin/evaluation/reject")
+async def reject_scorecard(
+    body: RejectBody,
+    identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+) -> dict[str, Any]:
+    """驳回:卡置 rejected(AI 参考分不采纳);可复评(run 生成新版本)。"""
+    version = body.version
+    if version is None:
+        row = await asyncio.to_thread(
+            evaluation.latest_scorecard, body.resume_id, body.cycle_id
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="该候选暂无评分卡,无法驳回")
+        version = int(row["card_version"])
+    changed = await asyncio.to_thread(
+        evaluation.set_scorecard_status,
+        body.resume_id,
+        body.cycle_id,
+        version,
+        "rejected",
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="评分卡不存在")
+    with contextlib.suppress(Exception):
+        audit.write_audit(
+            thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
+            acting_user_id=int(identity.get("user_id") or 0),
+            channel="evaluation",
+            agent="evaluation-reviewer",
+            action={
+                "op": "reject_scorecard",
+                "resume_id": body.resume_id,
+                "cycle_id": body.cycle_id,
+                "version": version,
+            },
+            decision=f"u{identity.get('user_id')}:reject",
+            result="评审驳回 AI 参考分(可复评)",
+        )
+    return {
+        "resume_id": body.resume_id,
+        "cycle_id": body.cycle_id,
+        "version": version,
+        "status": "rejected",
+    }
