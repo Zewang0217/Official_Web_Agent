@@ -5,6 +5,7 @@ import pytest
 from official_agent.evaluation import autograding as ag
 from official_agent.evaluation import awards
 from official_agent.evaluation import bundle as bd
+from official_agent.evaluation.autograding import TestFailure
 from official_agent.evaluation.scoring import FieldText
 
 # ── autograding 纯逻辑 ──────────────────────────────────
@@ -46,10 +47,17 @@ def test_extract_and_classify_failures() -> None:
         "env_setup_error",
     }
     buckets = ag.classify(failures)
-    assert buckets["timeout"] == ["test_query_timeout"]
-    assert buckets["boundary"] == ["test_edge_empty_input"]
-    assert buckets["environment"] == ["env_setup_error"]
-    assert buckets["logic"] == ["test_calc_total"]
+    # 桶值保留 (任务名, test 名)——#132 evidence 契约(B4 评审 P1)
+    assert buckets["timeout"] == [("task1", "test_query_timeout")]
+    assert buckets["boundary"] == [("task1", "test_edge_empty_input")]
+    assert buckets["environment"] == [("task5", "env_setup_error")]
+    assert buckets["logic"] == [("task1", "test_calc_total")]
+
+
+def test_boundary_keyword_wins_over_error() -> None:
+    """test_edge_error_* 这类命名应落边界桶而非环境桶(关键词序)。"""
+    buckets = ag.classify([TestFailure(task="t1", test_name="test_edge_error_case")])
+    assert buckets["boundary"] == [("t1", "test_edge_error_case")]
 
 
 def test_full_score_skips_lane() -> None:

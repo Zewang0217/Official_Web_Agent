@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import logging
 import secrets
 from dataclasses import dataclass
 
@@ -81,7 +81,7 @@ class EvaluationRunner:
         # 先派发后审计:审计失败不得让已建的 job 永远 pending(B2 E2E 实测)
         for job_id in job_ids:
             self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=trigger_user_id))
-        with contextlib.suppress(Exception):
+        try:
             await asyncio.to_thread(
                 audit.write_audit,
                 thread_id=f"eval:{cycle_id}:{secrets.token_hex(4)}",
@@ -95,6 +95,10 @@ class EvaluationRunner:
                 },
                 decision=f"u{trigger_user_id}:run",
                 result=f"提交 {len(job_ids)} 个初筛 job",
+            )
+        except Exception:  # noqa: BLE001 — 合规记录丢失必须可见
+            logging.getLogger(__name__).warning(
+                "触发审计写入失败(jobs=%s)", job_ids, exc_info=True
             )
         return job_ids
 
@@ -127,6 +131,26 @@ class EvaluationRunner:
                     cycle_id=cycle_id,
                     prompt_version=_prompt_version(),
                 )
+                # 调查 bundle → qbank(与评分同任务完成;失败不拖垮评分结果)
+                try:
+                    from official_agent.evaluation import bundle as eval_bundle
+                    from official_agent.state import qbank as qbank_store
+
+                    envelope = await eval_bundle.run_bundle(
+                        fields, resume_id=resume_id, cycle_id=cycle_id
+                    )
+                    await asyncio.to_thread(
+                        qbank_store.save_qbank,
+                        resume_id=resume_id,
+                        cycle_id=cycle_id,
+                        source=str(envelope.get("groups", [{}])[0].get("group", "bundle")),
+                        envelope=envelope,
+                        prompt_version=str(envelope.get("prompt_version", "")),
+                    )
+                except Exception:  # noqa: BLE001 — 题库线失败不拖垮评分卡
+                    logging.getLogger(__name__).warning(
+                        "调查 bundle 落库失败(job=%s)", job_id, exc_info=True
+                    )
                 await asyncio.to_thread(
                     evaluation.mark_job,
                     job_id,
@@ -165,8 +189,6 @@ class EvaluationRunner:
                     ),
                 )
             except Exception:  # noqa: BLE001 — 审计失败只记日志,不影响 job 态
-                import logging
-
                 logging.getLogger(__name__).warning(
                     "完成审计写入失败(job=%s)", job_id, exc_info=True
                 )

@@ -69,30 +69,37 @@ def save_qbank(
     prompt_version: str,
 ) -> int:
     """落题集:版本递增旧版保留(与 scorecard 同语义);返回 qbank_version。"""
-    with _conn() as conn:
-        ensure_qbank_tables(conn)
-        row = conn.execute(
-            "SELECT COALESCE(MAX(qbank_version), 0) AS v "
-            "FROM interview_qbank WHERE resume_id = %s AND cycle_id = %s",
-            (resume_id, cycle_id),
-        ).fetchone()
-        version = (row["v"] if row else 0) + 1
-        conn.execute(
-            """
-            INSERT INTO interview_qbank
-                (resume_id, cycle_id, qbank_version, source, envelope, prompt_version)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (
-                resume_id,
-                cycle_id,
-                version,
-                source,
-                json.dumps(envelope, ensure_ascii=False),
-                prompt_version,
-            ),
-        )
-    return version
+    # MAX+1 并发窗口:撞唯一键重读重试(同 evaluation.save_scorecard 先例)
+    for attempt in range(2):
+        try:
+            with _conn() as conn:
+                ensure_qbank_tables(conn)
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(qbank_version), 0) AS v "
+                    "FROM interview_qbank WHERE resume_id = %s AND cycle_id = %s",
+                    (resume_id, cycle_id),
+                ).fetchone()
+                version = (row["v"] if row else 0) + 1
+                conn.execute(
+                    """
+                    INSERT INTO interview_qbank
+                        (resume_id, cycle_id, qbank_version, source, envelope, prompt_version)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        resume_id,
+                        cycle_id,
+                        version,
+                        source,
+                        json.dumps(envelope, ensure_ascii=False),
+                        prompt_version,
+                    ),
+                )
+            return version
+        except psycopg.errors.UniqueViolation:
+            if attempt:
+                raise
+    raise RuntimeError("unreachable")
 
 
 def latest_qbank(resume_id: int, cycle_id: int) -> dict[str, Any] | None:

@@ -42,20 +42,23 @@ def extract_failures(submission: dict) -> list[TestFailure]:
     return failures
 
 
-def classify(failures: list[TestFailure]) -> dict[str, list[str]]:
-    """失败 test 名 → 归因桶。关键词:超时/环境(异常崩溃)/边界/其余逻辑。"""
-    buckets: dict[str, list[str]] = {}
+def classify(failures: list[TestFailure]) -> dict[str, list[tuple[str, str]]]:
+    """失败 → 归因桶;桶值保留 (任务名, test 名)——#132:evidence 必须两者都带。
+
+    关键词序:边界先于环境(常见命名 test_edge_error_* 不该落环境桶)。
+    """
+    buckets: dict[str, list[tuple[str, str]]] = {}
     for f in failures:
         name = f.test_name.lower()
         if "timeout" in name or "超时" in name:
             kind = "timeout"
-        elif any(k in name for k in ("error", "exception", "crash", "env")):
-            kind = "environment"
         elif any(k in name for k in ("edge", "boundary", "边界")):
             kind = "boundary"
+        elif any(k in name for k in ("error", "exception", "crash", "env")):
+            kind = "environment"
         else:
             kind = "logic"
-        buckets.setdefault(kind, []).append(f.test_name)
+        buckets.setdefault(kind, []).append((f.task, f.test_name))
     return buckets
 
 

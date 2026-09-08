@@ -17,6 +17,7 @@ from official_agent.evaluation.awards import (
     base_three_questions,
     build_award_brief,
     extract_awards,
+    suggest_plan,
 )
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.schema import QuestionSet
@@ -81,47 +82,66 @@ async def run_bundle(
     groups: list[dict[str, Any]] = []
     project_text = _project_text(fields)
 
-    # 仓线(B3)
-    repo_envelope = await ig.run_investigation(project_text, github_token=github_token)
-    groups.append({"group": "repo", **repo_envelope})
+    # 仓线(B3)。单线失败降级为空错误组,不炸整条 bundle(B4 评审 P2)
+    try:
+        repo_envelope = await ig.run_investigation(project_text, github_token=github_token)
+        groups.append({"group": "repo", **repo_envelope})
+    except Exception as exc:  # noqa: BLE001
+        groups.append(
+            {
+                "group": "repo",
+                "mode": "error",
+                "repo_summary": "",
+                "questions": [],
+                "error": f"{type(exc).__name__}: {exc}"[:300],
+            }
+        )
 
     # 评测线(#132)
-    autograding: dict[str, Any] | None = None
     if github_key:
         from official_agent.evaluation import autograding as ag
 
         submission = await ag.fetch_latest_submission(github_key)
         if submission and not ag.is_full_score(submission):
             failures = ag.extract_failures(submission)
-            buckets = ag.classify(failures)
-            material = "\n".join(
-                f"[{kind}] {name}" for kind, names in buckets.items() for name in names
-            )
-            ag_questions = await _b4_questions(
-                f"评测失败清单:\n{material or '(无明细)'}", count_min=2, count_max=3
-            )
-            autograding = {
-                "group": "autograding",
-                "mode": "error_analysis",
-                "repo_summary": f"评测非满分,失败 {len(failures)} 项",
-                "questions": ag_questions,
-                "prompt_version": _prompt_version(),
-            }
-            groups.append(autograding)
+            if not failures:
+                pass  # 非满分但抽不出失败明细:出题只会诱导编造,略过该线
+            else:
+                buckets = ag.classify(failures)
+                material = "\n".join(
+                    f"[{kind}] {task}/{name}"
+                    for kind, items in buckets.items()
+                    for task, name in items
+                )
+                ag_questions = await _b4_questions(
+                    f"评测失败清单(任务/test):\n{material}", count_min=2, count_max=3
+                )
+                groups.append(
+                    {
+                        "group": "autograding",
+                        "mode": "error_analysis",
+                        "repo_summary": f"评测非满分,失败 {len(failures)} 项",
+                        "questions": ag_questions,
+                        "prompt_version": _prompt_version(),
+                    }
+                )
 
-    # 奖项线(#131)
+    # 奖项线(#131):verified 的背景卡也进信封(检查点⑤到位后面试官有料可读)
     awards = extract_awards(fields)
     award_questions: list[dict] = []
+    award_briefs: list[dict] = []
     for title in awards[:3]:
         brief = await build_award_brief(provider, title)
+        award_briefs.append(brief)
         award_questions.extend(brief.get("questions", []))
-    if award_questions:
+    if award_questions or award_briefs:
         groups.append(
             {
                 "group": "awards",
                 "mode": "award_brief",
                 "repo_summary": f"奖项 {len(awards)} 项",
                 "questions": award_questions,
+                "briefs": award_briefs,
                 "prompt_version": _prompt_version(),
             }
         )
@@ -153,8 +173,6 @@ async def run_bundle(
         )
 
     all_questions = [q for g in groups for q in g.get("questions", [])]
-    from official_agent.evaluation.awards import suggest_plan
-
     envelope = {
         "groups": groups,
         "suggested_plan": suggest_plan(all_questions, budget_minutes=15),

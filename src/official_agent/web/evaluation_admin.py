@@ -7,6 +7,7 @@ agent:monitor 一样走 JWT permission_codes 自校)。
 
 import asyncio
 import contextlib
+import logging
 import secrets
 from typing import Annotated, Any
 
@@ -196,10 +197,6 @@ class RejectBody(BaseModel):
     version: int | None = None
 
 
-def _require_review_audit():
-    return _require_resume_audit()
-
-
 @router.get("/admin/evaluation/queue")
 async def evaluation_queue(
     _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
@@ -213,17 +210,19 @@ async def evaluation_queue(
     def _query() -> list[dict[str, Any]]:
         with evaluation._conn() as conn:
             evaluation.ensure_evaluation_tables(conn)
-            where = (
-                "cycle_id = %s AND hard_zero = TRUE"
-                if queue == "zero"
-                else "cycle_id = %s"
-            )
+            # 先取每简历最新卡,再按 hard_zero 过滤(B4 评审 P2:复评翻盘后
+            # 不应以过期旧卡滞留 0 分队列)
+            outer = "WHERE hard_zero = TRUE" if queue == "zero" else ""
             rows = conn.execute(
                 f"""
-                SELECT DISTINCT ON (resume_id)
-                    resume_id, card_version, status, hard_zero, total, prompt_version, created_at
-                FROM evaluation_scorecard WHERE {where}
-                ORDER BY resume_id, card_version DESC
+                SELECT * FROM (
+                    SELECT DISTINCT ON (resume_id)
+                        resume_id, card_version, status, hard_zero, total,
+                        prompt_version, created_at
+                    FROM evaluation_scorecard WHERE cycle_id = %s
+                    ORDER BY resume_id, card_version DESC
+                ) latest {outer}
+                ORDER BY resume_id
                 """,
                 (cycle_id,),
             ).fetchall()
@@ -275,6 +274,23 @@ async def adopt_scorecard(
         )
     except BackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # 投票已有外部副作用:先落审计再做卡态迁移(评审 P2:404 不丢双录后半)
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(
+            audit.write_audit,
+            thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
+            acting_user_id=int(identity.get("user_id") or 0),
+            channel="evaluation",
+            agent="evaluation-reviewer",
+            action={
+                "op": "adopt_vote_cast",
+                "resume_id": body.resume_id,
+                "cycle_id": body.cycle_id,
+                "score": body.score,
+            },
+            decision=f"u{identity.get('user_id')}:adopt",
+            result="评审一票已投后端(终分=多人平均)",
+        )
 
     version = body.version
     if version is None:
@@ -293,7 +309,7 @@ async def adopt_scorecard(
     )
     if not changed:
         raise HTTPException(status_code=404, detail="评分卡不存在")
-    with contextlib.suppress(Exception):
+    try:
         audit.write_audit(
             thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
             acting_user_id=int(identity.get("user_id") or 0),
@@ -308,6 +324,10 @@ async def adopt_scorecard(
             },
             decision=f"u{identity.get('user_id')}:adopt",
             result=f"评审采纳为一票(score={body.score});终分=多人平均",
+        )
+    except Exception:  # noqa: BLE001 — 审计失败不影响采纳,但必须可见
+        logging.getLogger(__name__).warning(
+            "采纳审计写入失败(resume=%s)", body.resume_id, exc_info=True
         )
     return {
         "resume_id": body.resume_id,
@@ -341,7 +361,7 @@ async def reject_scorecard(
     )
     if not changed:
         raise HTTPException(status_code=404, detail="评分卡不存在")
-    with contextlib.suppress(Exception):
+    try:
         audit.write_audit(
             thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
             acting_user_id=int(identity.get("user_id") or 0),
@@ -355,6 +375,10 @@ async def reject_scorecard(
             },
             decision=f"u{identity.get('user_id')}:reject",
             result="评审驳回 AI 参考分(可复评)",
+        )
+    except Exception:  # noqa: BLE001 — 审计失败不影响驳回,但必须可见
+        logging.getLogger(__name__).warning(
+            "驳回审计写入失败(resume=%s)", body.resume_id, exc_info=True
         )
     return {
         "resume_id": body.resume_id,
