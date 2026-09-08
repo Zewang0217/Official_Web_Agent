@@ -23,16 +23,24 @@ _PLACEHOLDER_EXACT = frozenset({"无", "无。", "暂无", "没有", "同上", "
 
 @dataclass(frozen=True)
 class FieldText:
-    """一个待评维度。value 是简历原文(已脱敏,PII 不进打分面,#123)。"""
+    """一个待评维度。value 是简历原文(已脱敏,PII 不进打分面,#123)。
+
+    placeholder 来自周期字段配置(B2 接线);有精确 placeholder 时
+    「与 placeholder 同文」按全等判,比前缀启发式更准。
+    """
 
     field_key: str
     title: str
     value: str
+    placeholder: str = ""
 
 
-def is_hard_zero_value(value: str, *, title: str = "") -> bool:
+def is_hard_zero_value(
+    value: str, *, title: str = "", placeholder: str = ""
+) -> bool:
     """单值绝对卡判定。规则序:空 → 单字 → 单字符重复 → 纯数字 → placeholder。"""
     v = (value or "").strip()
+    ph = (placeholder or "").strip()
     return bool(
         not v
         or len(v) <= 1
@@ -40,6 +48,7 @@ def is_hard_zero_value(value: str, *, title: str = "") -> bool:
         or bool(_PURE_DIGIT.fullmatch(v))
         or v in _PLACEHOLDER_EXACT
         or v.startswith(_PLACEHOLDER_PREFIX)
+        or bool(ph and v == ph)  # 与配置的 placeholder 全等
         or bool(title and v == title.strip())  # 抄字段名本身
     )
 
@@ -48,7 +57,7 @@ def detect_hard_zero(fields: list[FieldText]) -> dict[str, str]:
     """扫描全部打分维,返回 {field_key: 命中原因};空 dict = 无绝对卡。"""
     reasons: dict[str, str] = {}
     for f in fields:
-        if is_hard_zero_value(f.value, title=f.title):
+        if is_hard_zero_value(f.value, title=f.title, placeholder=f.placeholder):
             reasons[f.field_key] = _reason_of(f.value, f.title)
     return reasons
 
