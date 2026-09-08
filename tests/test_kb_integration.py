@@ -209,3 +209,87 @@ async def test_model_change_bumps_version_and_clears_vectors(kb_env) -> None:
 
     hits2 = await store.search("ax0", embedder=_axis_embedder(), top_k=5)
     assert [h.source_id for h in hits2] == [sid2]  # 只有换代后入库的可检索
+
+
+async def test_admin_api_roundtrip_real_pg(monkeypatch) -> None:
+    """R2 真机等效闸:真实 HTTP(TestClient)→ 鉴权 → store → 真 pgvector 全链。"""
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    from fastapi.testclient import TestClient
+
+    from official_agent.web import routes
+    from official_agent.web.app import create_app
+
+    _patch_pg(monkeypatch)
+    monkeypatch.setattr("official_agent.kb.store.embed_texts", _axis_embedder())
+
+    @contextlib.asynccontextmanager
+    async def _fake_checkpointer() -> AsyncIterator[None]:
+        yield object()  # 真值 → /health ok(本测试只关注 KB 面)
+
+    monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
+    # lifespan 建表走真实 .env PG(测试外),与 KB 无关 → 打桩
+    monkeypatch.setattr(
+        "official_agent.state.threads.ensure_agent_threads_table", lambda: None
+    )
+    monkeypatch.setattr(
+        "official_agent.state.conversation.ensure_conversation_table", lambda: None
+    )
+    monkeypatch.setattr(
+        "official_agent.state.config_store.ensure_config_table", lambda: None
+    )
+
+    async def _resolve(*_a: object, **_k: object) -> dict:
+        return {
+            "user_id": 2,
+            "role": "admin",
+            "role_names": ["管理员"],
+            "permission_codes": ["kb:manage"],
+            "source": "web",
+        }
+
+    monkeypatch.setattr(routes, "resolve", _resolve)
+
+    with TestClient(create_app()) as client:
+        assert client.get("/health").json()["status"] == "ok"
+        assert (
+            client.get("/api/agent/admin/kb/sources").status_code == 401
+        )  # 未带 token
+
+        auth = {"Authorization": "Bearer tok"}
+        created = client.post(
+            "/api/agent/admin/kb/sources",
+            headers=auth,
+            json={
+                "title": "报名FAQ",
+                "type": "faq",
+                "question": "ax0 怎么报名?",
+                "answer": "官网填表",
+            },
+        )
+        assert created.status_code == 201, created.text
+        sid = created.json()["source_id"]
+
+        detail = client.get(f"/api/agent/admin/kb/sources/{sid}", headers=auth)
+        assert detail.status_code == 200
+        assert detail.json()["question"] == "ax0 怎么报名?"
+        assert detail.json()["chunk_count"] == 1
+
+        listed = client.get(
+            "/api/agent/admin/kb/sources?keyword=报名FAQ", headers=auth
+        )
+        assert listed.status_code == 200 and listed.json()["total"] >= 1
+
+        # 检索层经真实库确认可召回(HTTP 管理面外圈)
+        hits = await store.search("ax0 报名", embedder=_axis_embedder())
+        assert any(h.source_id == sid for h in hits)
+
+        assert (
+            client.delete(f"/api/agent/admin/kb/sources/{sid}", headers=auth).status_code
+            == 200
+        )
+        assert (
+            client.get(f"/api/agent/admin/kb/sources/{sid}", headers=auth).status_code
+            == 404
+        )
