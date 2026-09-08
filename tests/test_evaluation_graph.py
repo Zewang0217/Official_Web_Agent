@@ -132,7 +132,7 @@ def test_extract_json_tolerates_fences_and_noise() -> None:
     assert ev._extract_json('```json\n{"a": 1}\n```') == '{"a": 1}'
     assert ev._extract_json('好的,以下是结果:\n{"a": 1}') == '{"a": 1}'
     tail = '以下是结果:\n{"a": 1}\n注:权重仅供参考}'
-    assert ev._extract_json(tail) == '{"a": 1}\n注:权重仅供参考}'  # rfind 边界:截到最外层
+    assert ev._extract_json(tail) == '{"a": 1}'  # raw_decode:尾随杂文不进 JSON
     with pytest.raises(ValueError, match="不含 JSON"):
         ev._extract_json("模型打摆了,没有 JSON")
 
@@ -166,3 +166,48 @@ def test_fabricated_evidence_raises() -> None:
         pytest.raises(RuntimeError, match="证据非原文"),
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=6, cycle_id=2026))
+
+
+@pytest.mark.asyncio
+async def test_placeholder_flows_into_hard_zero() -> None:
+    """B2 评审 P1:placeholder 必须进绝对卡判定(端到端通路)。"""
+    fields = [
+        {
+            "field_key": "intro",
+            "title": "自我介绍",
+            "value": "介绍一下你参与过的项目、承担的角色和最终成果",  # 抄配置 placeholder
+            "placeholder": "介绍一下你参与过的项目、承担的角色和最终成果",
+        },
+        {
+            "field_key": "reason",
+            "title": "加入理由",
+            "value": "请描述你印象最深的协作:大二时我组织过校际联调试。",
+            "placeholder": "说说你为什么想加入",
+        },
+    ]
+    card = await ev.run_evaluation(fields, resume_id=7, cycle_id=2026)
+    assert card["hard_zero"] is True
+    # intro 命中 placeholder 全等;reason 有配置 placeholder 时前缀启发式不启用 → 不卡
+    assert "placeholder 文案未改" in str(card["hard_zero_reasons"])
+    # 有配置 placeholder 的 reason:前缀启发式不启用,抄题开头不作卡
+    assert "reason" not in card["hard_zero_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_all_zero_llm_card_marks_hard_zero() -> None:
+    """B2 评审 P1:AI 全 0 分卡也要落 hard_zero(0 分队列靠它捞)。"""
+    payload = (
+        '{"dimensions": ['
+        '{"field_key": "intro", "score": 0, "rationale": "r",'
+        ' "evidence": "我是张三,做过两个 Web 项目。"},'
+        '{"field_key": "reason", "score": 0, "rationale": "r",'
+        ' "evidence": "认同社团氛围,想参与招新开发。"}],'
+        '"attitude": {"verdict": "bad_faith", "reason": "整份无实质内容"}}'
+    )
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _fake_model(payload)),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        card = await ev.run_evaluation(_FIELDS, resume_id=8, cycle_id=2026)
+    assert card["hard_zero"] is True
+    assert card["total"] == 0.0

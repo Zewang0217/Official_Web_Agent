@@ -55,22 +55,32 @@ def _as_field_texts(fields: list[dict[str, str]]) -> list[FieldText]:
             field_key=str(f["field_key"]),
             title=str(f.get("title", "")),
             value=str(f.get("value", "")),
+            placeholder=str(f.get("placeholder", "")),
         )
         for f in fields
     ]
 
 
 def _extract_json(text: str) -> str:
-    """从模型回复中截取 JSON 主体(容忍代码围栏/前后杂文)。"""
+    """从模型回复中截取首个完整 JSON 对象(容忍代码围栏/前后杂文)。
+
+    raw_decode 而非 rfind:尾随杂文含 `}` 时 rfind 会切进噪声产出非法
+    JSON(B2 评审 P2);raw_decode 取首个完整对象,天然正确。
+    """
+    import json
+
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
     start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    if start == -1:
         raise ValueError(f"模型回复不含 JSON:{cleaned[:120]}")
-    return cleaned[start : end + 1]
+    try:
+        _, end = json.JSONDecoder().raw_decode(cleaned, start)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 解析失败:{cleaned[:120]}") from exc
+    return cleaned[start:end]
 
 
 async def precheck(state: EvaluationState) -> dict:
@@ -172,6 +182,7 @@ async def llm_score(state: EvaluationState) -> dict:
                     f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}"
                 )
         scores = {d.field_key: d.score for d in result.dimensions}
+        card_total_zero = bool(scores) and all(s == 0 for s in scores.values())
         card = {
             "schema": CARD_SCHEMA_VERSION,
             "resume_id": state["resume_id"],
@@ -179,8 +190,12 @@ async def llm_score(state: EvaluationState) -> dict:
             "dimensions": [d.model_dump() for d in result.dimensions],
             "attitude": result.attitude.model_dump(),
             "total": weighted_total(scores, state.get("weights", {})),
-            "hard_zero": False,
-            "hard_zero_reasons": {},
+            # AI 全 0 = 初筛不过同样落 hard_zero(B2 评审 P1:0 分队列靠它捞)
+            "hard_zero": card_total_zero
+            or result.attitude.verdict == "bad_faith",
+            "hard_zero_reasons": (
+                {"_attitude": "AI 判定各维全 0,初筛不过"} if card_total_zero else {}
+            ),
             "versions": {
                 "prompt": _prompt_version(),
                 "weights": "cycle-config",

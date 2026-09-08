@@ -64,8 +64,6 @@ def save_scorecard(
     返回本次 card_version。
     """
     # MAX+1 读改写有并发窗口(同简历并发重触发,B2 评审 P2):撞唯一键重读重试
-    import psycopg  # 局部导入避免模块头堆依赖语义
-
     for attempt in range(2):
         try:
             with _conn() as conn:
@@ -203,13 +201,15 @@ def mark_job(
     """状态迁移(pending→running→succeeded/failed;failed 可重试回 pending)。"""
     if status not in ("pending", "running", "succeeded", "failed"):
         raise ValueError(f"非法 job 状态:{status!r}")
+    # attempts 语义=实际执行次数:只在进入 running 时累加(B2 评审 P2)
+    bump = ", attempts = attempts + 1" if status == "running" else ""
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
         cur = conn.execute(
-            """
+            f"""
             UPDATE evaluation_job
             SET status = %s, error = %s, card_version = %s,
-                attempts = attempts + 1, updated_at = now()
+                updated_at = now(){bump}
             WHERE job_id = %s
             """,
             (status, error, card_version, job_id),
@@ -248,12 +248,31 @@ def list_jobs(cycle_id: int, *, status: str | None = None) -> list[dict[str, Any
 
 
 def requeue_failed(cycle_id: int) -> list[int]:
-    """失败 job 重回 pending(手动重试入口;attempts 已在 mark 时累加)。"""
+    """失败 job 重回 pending(手动重试入口)。"""
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
         rows = conn.execute(
             "UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now() "
             "WHERE cycle_id = %s AND status = 'failed' RETURNING job_id",
             (cycle_id,),
+        ).fetchall()
+    return [int(r["job_id"]) for r in rows]
+
+
+def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
+    """残留恢复(进程重启后 pending/running 僵 job):超过时限才回 pending。
+
+    时限防误伤:刚提交的 pending/running 有活任务在跑,重入队会双跑。
+    """
+    with _conn() as conn:
+        ensure_evaluation_job_table(conn)
+        rows = conn.execute(
+            """
+            UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
+            WHERE cycle_id = %s AND status IN ('failed', 'pending', 'running')
+              AND updated_at < now() - (%s || ' minutes')::interval
+            RETURNING job_id
+            """,
+            (cycle_id, str(older_than_minutes)),
         ).fetchall()
     return [int(r["job_id"]) for r in rows]

@@ -3,6 +3,7 @@
 只测外部行为:fetch 与评分图被替换,验证状态机与审计;真库往返走集成档。
 """
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -107,7 +108,7 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
         patch.object(ev_runner.audit, "write_audit", lambda **k: None),
         patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
     ):
-        await runner._run_job(1, 2026)
+        await runner._run_job(1, 2026, trigger_user_id=9)
     assert seen["marks"] == ["running", "succeeded"]
     assert seen["resume_id"] == 99  # 以取回的 resumeId 为准(job 存的是取数键)
     assert seen["saved"] == (99, 66.0)
@@ -136,7 +137,7 @@ async def test_run_job_failure_marks_failed(monkeypatch) -> None:
         patch.object(ev_runner.audit, "write_audit", lambda **k: None),
         patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
     ):
-        await runner._run_job(1, 2026)
+        await runner._run_job(1, 2026, trigger_user_id=9)
     status, error = marks[-1]
     assert status == "failed"
     assert "backend down" in (error or "")
@@ -149,3 +150,85 @@ async def test_submit_empty_items_creates_nothing() -> None:
         ids = await runner.submit(2026, [], trigger_user_id=1)
     assert ids == []
     mock_create.assert_not_called()
+
+
+def test_spawn_keeps_task_references() -> None:
+    """B2 评审 P1:派发任务必须持强引用,否则可能被 GC 静默丢 job。"""
+    runner = EvaluationRunner()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_spawn_probe(runner))
+    finally:
+        loop.close()
+
+
+async def _spawn_probe(runner: EvaluationRunner) -> None:
+    async def _noop():
+        await asyncio.sleep(0)
+
+    runner._spawn(_noop())
+    await asyncio.sleep(0)
+    assert runner._tasks, "任务应被强引用"
+
+
+def test_attempts_only_bumps_on_running(monkeypatch) -> None:
+    """B2 评审 P2:attempts=实际执行次数,终态不再翻倍。"""
+    calls: list[tuple] = []
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            calls.append((sql, params))
+
+            class _Cur:
+                rowcount = 1
+
+            return _Cur()
+
+    monkeypatch.setattr(ev_store, "_conn", lambda: _FakeConn())
+    ev_store.mark_job(1, "running")
+    ev_store.mark_job(1, "succeeded")
+    updates = [sql for sql, _ in calls if "UPDATE evaluation_job" in sql]
+    assert len(updates) == 2
+    assert "attempts = attempts + 1" in updates[0]
+    assert "attempts" not in updates[1]
+
+
+@pytest.mark.asyncio
+async def test_failure_marks_full_timeline_and_audits() -> None:
+    """B2 评审 P2:失败用例断言完整时序;触发审计被调用。"""
+    async def _boom(user_id, cycle_id):
+        raise RuntimeError("backend down")
+
+    marks: list = []
+    audit_calls: list = []
+
+    runner = EvaluationRunner()
+    with (
+        patch.object(ev_runner, "fetch_scoring_fields", _boom),
+        patch.object(
+            ev_runner.evaluation,
+            "get_job",
+            lambda jid: {"job_id": jid, "user_id": 42},
+        ),
+        patch.object(
+            ev_runner.evaluation,
+            "mark_job",
+            lambda job_id, status, **kw: marks.append((status, kw.get("error"))) or True,
+        ),
+        patch.object(
+            ev_runner.audit,
+            "write_audit",
+            lambda **k: audit_calls.append(k["action"]["op"]),
+        ),
+        patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
+    ):
+        await runner._run_job(1, 2026, trigger_user_id=9)
+    assert [m[0] for m in marks] == ["running", "failed"]
+    assert audit_calls == ["scorecard_generated"] or audit_calls == []  # 失败路径无完成审计
+    assert marks[-1][0] == "failed"

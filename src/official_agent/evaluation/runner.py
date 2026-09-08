@@ -38,6 +38,9 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
     client = await get_backend_client()
     data = await client.get(f"/api/resumes/admin/{user_id}/{cycle_id}")
     resume_id = int(data.get("resumeId") or 0)
+    if resume_id <= 0:
+        # 缺 resumeId 静默落 0 会产生查不到的幽灵卡(B2 评审 P2)
+        raise RuntimeError("后端响应缺 resumeId,拒绝评分")
     fields = [
         FieldText(
             field_key=str(f.get("fieldKey") or ""),
@@ -56,6 +59,13 @@ class EvaluationRunner:
 
     def __init__(self) -> None:
         self._sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+        # asyncio 只持任务弱引用:不保存会被 GC,job 静默卡死(B2 评审 P1)
+        self._tasks: set[asyncio.Task] = set()
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def submit(
         self, cycle_id: int, items: list[TriggerItem], *, trigger_user_id: int
@@ -81,15 +91,16 @@ class EvaluationRunner:
             result=f"提交 {len(job_ids)} 个初筛 job",
         )
         for job_id in job_ids:
-            asyncio.get_running_loop().create_task(self._run_job(job_id, cycle_id))
+            self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=trigger_user_id))
         return job_ids
 
-    async def _run_job(self, job_id: int, cycle_id: int) -> None:
+    async def _run_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
         job = await asyncio.to_thread(evaluation.get_job, job_id)
         if job is None:
             return
         async with self._sem:
             await asyncio.to_thread(evaluation.mark_job, job_id, "running")
+            card: dict | None = None
             try:
                 resume_id, fields = await fetch_scoring_fields(job["user_id"], cycle_id)
                 card = await run_evaluation(
@@ -118,20 +129,6 @@ class EvaluationRunner:
                     "succeeded",
                     card_version=version,
                 )
-                audit.write_audit(
-                    thread_id=f"eval:{cycle_id}:{secrets.token_hex(4)}",
-                    acting_user_id=int(job["user_id"]),
-                    channel="evaluation",
-                    agent="evaluation-runner",
-                    action={
-                        "op": "scorecard_generated",
-                        "resume_id": resume_id,
-                        "cycle_id": cycle_id,
-                        "hard_zero": bool(card.get("hard_zero")),
-                    },
-                    decision="system:auto",
-                    result=f"卡 v{version},总分 {card.get('total')}(AI 参考分,未写 resume_score)",
-                )
             except Exception as exc:  # noqa: BLE001 — job 失败落表,可重试
                 await asyncio.to_thread(
                     evaluation.mark_job,
@@ -139,12 +136,50 @@ class EvaluationRunner:
                     "failed",
                     error=f"{type(exc).__name__}: {exc}"[:500],
                 )
+                return
+            # 完成审计在保护段外:审计失败不得把已 succeeded 的 job 翻成 failed
+            try:
+                await asyncio.to_thread(
+                    audit.write_audit,
+                    thread_id=f"eval:{cycle_id}:{secrets.token_hex(4)}",
+                    acting_user_id=trigger_user_id,  # 谁触发谁进审计(ADR-0006)
+                    channel="evaluation",
+                    agent="evaluation-runner",
+                    action={
+                        "op": "scorecard_generated",
+                        "resume_id": resume_id,
+                        "cycle_id": cycle_id,
+                        "candidate_user_id": job["user_id"],
+                        "hard_zero": bool(card.get("hard_zero")) if card else None,
+                    },
+                    decision="system:auto",
+                    result=(
+                        f"卡 v{version},总分 {card.get('total')}"
+                        "(AI 参考分,未写 resume_score)"
+                        if card
+                        else "生成完成"
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — 审计失败只记日志,不影响 job 态
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "完成审计写入失败(job=%s)", job_id, exc_info=True
+                )
 
     async def retry_failed(self, cycle_id: int) -> list[int]:
         """失败 job 全部重回 pending 并重新派发;返回重派 job_ids。"""
         job_ids = await asyncio.to_thread(evaluation.requeue_failed, cycle_id)
         for job_id in job_ids:
-            asyncio.get_running_loop().create_task(self._run_job(job_id, cycle_id))
+            self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=0))
+        return job_ids
+
+
+    async def retry_stale(self, cycle_id: int) -> list[int]:
+        """残留恢复:failed + 超时限的 pending/running 全部重回 pending 并派发。"""
+        job_ids = await asyncio.to_thread(evaluation.requeue_stale, cycle_id)
+        for job_id in job_ids:
+            self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=0))
         return job_ids
 
 

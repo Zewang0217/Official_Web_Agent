@@ -72,10 +72,14 @@ async def list_evaluation_jobs(
 async def retry_failed_jobs(
     identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
     cycle_id: int,
+    include_stale: bool = False,
 ) -> dict[str, Any]:
-    """失败 job 批量重试(重回 pending 并派发)。"""
+    """失败 job 批量重试;include_stale=true 时连进程重启残留一起恢复。"""
     try:
-        job_ids = await eval_runner.get_runner().retry_failed(cycle_id)
+        if include_stale:
+            job_ids = await eval_runner.get_runner().retry_stale(cycle_id)
+        else:
+            job_ids = await eval_runner.get_runner().retry_failed(cycle_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="重试失败,请稍后重试") from exc
     return {"retried": job_ids}
