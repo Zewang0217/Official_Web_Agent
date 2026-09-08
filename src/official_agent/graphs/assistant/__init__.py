@@ -2,11 +2,12 @@
 
 形态(ADR-0003):无意图分类,「意图」由模型在循环内选工具隐式表达。
 装配粗粒度三档(SEC-02 后续细化到权限码级并补安全测试):
-- admin:9 个只读工具全量
-- member:公共查询面(open_cycle/search/统计/场次容量)
+- admin:10 个只读工具全量(含 RAG #134 的 search_knowledge)
+- member:公共查询面(open_cycle/search/统计/场次容量)+ search_knowledge
 - candidate:get_open_cycle + get_my_interview,且装配时绑定用户令牌——模型只见
   cycle_id,永不接触凭证(凭证红线,GRA-01 同款纪律);加 get_open_cycle 是为让
-  候选人自动拿「当前开放周期」再查本人面试(候选入口无周期管理,需自己能取)
+  候选人自动拿「当前开放周期」再查本人面试(候选入口无周期管理,需自己能取);
+  search_knowledge 供社团/部门/FAQ 公开知识问答(#134 R3,#120:访客不给)
 - unknown:空集(无工具,纯问答;装配层是第一道闸,ADR-0005)
 
 静态前缀纪律(prompt cache,参考 ai-agent-book ch2):
@@ -26,7 +27,7 @@ from pydantic import SecretStr
 
 from official_agent.config import get_effective_settings
 from official_agent.graphs.identity import ResolvedIdentity
-from official_agent.tools import readonly
+from official_agent.tools import knowledge, readonly
 
 _PROMPT_FILE = Path(__file__).parent.parent.parent / "prompts" / "assistant.md"
 
@@ -41,14 +42,16 @@ _ROLE_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "list_reschedule_requests",
         "get_recruit_statistics",
         "get_candidate_card",
+        "search_knowledge",
     ),
     "member": (
         "get_open_cycle",
         "search_resumes",
         "get_recruit_statistics",
         "find_available_sessions",
+        "search_knowledge",
     ),
-    "candidate": ("get_open_cycle", "get_my_interview"),
+    "candidate": ("get_open_cycle", "get_my_interview", "search_knowledge"),
     "unknown": (),
 }
 
@@ -62,6 +65,7 @@ _ALL_TOOLS: dict[str, object] = {
     "list_reschedule_requests": readonly.list_reschedule_requests,
     "get_recruit_statistics": readonly.get_recruit_statistics,
     "get_candidate_card": readonly.get_candidate_card,
+    "search_knowledge": knowledge.search_knowledge,
 }
 
 
