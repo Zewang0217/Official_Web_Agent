@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 from dataclasses import dataclass
 
@@ -77,21 +78,24 @@ class EvaluationRunner:
             [(i.resume_id, i.user_id) for i in items],
             cycle_id,
         )
-        audit.write_audit(
-            thread_id=f"eval:{cycle_id}:{secrets.token_hex(4)}",
-            acting_user_id=trigger_user_id,
-            channel="evaluation",
-            agent="evaluation-runner",
-            action={
-                "op": "run_initial_screening",
-                "cycle_id": cycle_id,
-                "resume_ids": [i.resume_id for i in items],
-            },
-            decision=f"u{trigger_user_id}:run",
-            result=f"提交 {len(job_ids)} 个初筛 job",
-        )
+        # 先派发后审计:审计失败不得让已建的 job 永远 pending(B2 E2E 实测)
         for job_id in job_ids:
             self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=trigger_user_id))
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                audit.write_audit,
+                thread_id=f"eval:{cycle_id}:{secrets.token_hex(4)}",
+                acting_user_id=trigger_user_id,
+                channel="evaluation",
+                agent="evaluation-runner",
+                action={
+                    "op": "run_initial_screening",
+                    "cycle_id": cycle_id,
+                    "resume_ids": [i.resume_id for i in items],
+                },
+                decision=f"u{trigger_user_id}:run",
+                result=f"提交 {len(job_ids)} 个初筛 job",
+            )
         return job_ids
 
     async def _run_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:

@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     get_checkpointer() 进入建连+建表,退出关闭(与 CLI cli.py:169-176 同语义)。
     """
     from official_agent.state import config_store, conversation
+    from official_agent.state.audit import ensure_audit_table
     from official_agent.state.pg import get_checkpointer
     from official_agent.state.threads import ensure_agent_threads_table
     async with get_checkpointer() as saver:
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_agent_threads_table()
             conversation.ensure_conversation_table()
             config_store.ensure_config_table()
+            ensure_audit_table()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
         yield
