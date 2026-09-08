@@ -1,0 +1,98 @@
+"""调查子图路由与值得度(B3,#130,含 #129 合并裁定):纯函数决策层。
+
+- 路由(#130):短文本+有仓→深挖;短文本+无仓→skip;
+  有项目文本但无仓/仓不可读→通用引导题(不 skip 项目维)
+- 值得度(#130):README 体量/提交数/文件面结构 → none|low|high → 定题数
+- 全部零 IO(IO 在 github_client/LLM 节点),决策可单测
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Literal
+
+# 项目维字段键的语义匹配(周期配置驱动,键名不稳定,按 label/键名猜)
+_PROJECT_HINTS = ("project", "项目")
+# 仓库 URL:github.com/owner/repo(容忍 .git 后缀与尾随标点)
+_REPO_URL = re.compile(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", re.IGNORECASE)
+
+# 有实质内容的最短长度(#130「短文本但说了做了什么」)
+_MIN_SUBSTANTIVE = 24
+
+# 值得度信号
+_SIGNAL_DIRS = ("src/", "app/", "tests/", "test/", "docs/", "server/", "client/")
+
+
+def extract_repo(text: str) -> tuple[str, str] | None:
+    """从项目文本提取 (owner, repo);无 GitHub 链接返回 None。"""
+    m = _REPO_URL.search(text or "")
+    if not m:
+        return None
+    owner, repo = m.group(1), m.group(2)
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+    return owner, repo
+
+
+def route_project(
+    project_text: str, repo_readable: bool | None
+) -> Literal["deep_dive", "skip", "guided"]:
+    """路由判据(#130)。repo_readable:None=无仓位置;True/False=有仓且探测结果。
+
+    - 有仓 + 可读 → deep_dive
+    - 无仓 + 无实质内容 → skip(此维不浪费题)
+    - 其余(有仓不可读 / 无仓但有实质内容)→ guided
+    """
+    substantive = len((project_text or "").strip()) >= _MIN_SUBSTANTIVE
+    has_repo = repo_readable is not None
+    if has_repo and repo_readable:
+        return "deep_dive"
+    if not has_repo and not substantive:
+        return "skip"
+    return "guided"
+
+
+def repo_worthiness(
+    *, readme_chars: int, commit_count: int, paths: list[str]
+) -> Literal["none", "low", "high"]:
+    """值得度(#130):零信号不出题/浅仓浅问/full-app 深问。
+
+    信号:README 体量、提交数、结构性目录(src/tests/docs)。
+    """
+    signals = 0
+    if readme_chars >= 400:
+        signals += 1
+    if commit_count >= 10:
+        signals += 2
+    elif commit_count >= 3:
+        signals += 1
+    if any(p.startswith(_SIGNAL_DIRS) for p in paths):
+        signals += 1
+    if len(paths) >= 30:
+        signals += 1
+    if signals >= 4:
+        return "high"
+    if signals >= 2:
+        return "low"
+    return "none"
+
+
+WORTHINESS_QUESTION_COUNT = {"none": 0, "low": 2, "high": 4}
+
+
+def build_repo_brief(
+    *, readme: str, commits: list[dict], paths: list[str]
+) -> str:
+    """给模型的仓库简报(紧凑,控 token):README 头部+路径样本+提交摘要。"""
+    readme_head = readme[:1500].strip() or "(无 README)"
+    sample_paths = "\n".join(f"- {p}" for p in paths[:40]) or "(空仓)"
+    commit_lines = "\n".join(
+        f"- {c.get('date', '')[:10]} {c.get('message', '').splitlines()[0][:60]}"
+        for c in commits[:15]
+        if c.get("message")
+    )
+    return (
+        f"README(截断):\n{readme_head}\n\n"
+        f"文件结构样本:\n{sample_paths}\n\n"
+        f"最近提交:\n{commit_lines or '(无提交记录)'}"
+    )

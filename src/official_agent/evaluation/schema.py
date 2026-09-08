@@ -46,3 +46,46 @@ class ScorecardOutput(BaseModel):
 
     dimensions: list[DimensionScore] = Field(min_length=1)
     attitude: AttitudeVerdict
+
+
+class QuestionEvidence(BaseModel):
+    """证据锚:仓内可点路径(deep_dive 必填);无仓引导题留空+note 说明。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = ""
+    note: str = ""
+
+
+class AnswerReference(BaseModel):
+    """参考答案三锚(#125/#127):面试官据此判断答得算好/达标/弱。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strong: str = Field(min_length=1)
+    acceptable: str = Field(min_length=1)
+    weak: str = Field(min_length=1)
+
+
+class InterviewQuestion(BaseModel):
+    """单道预置面试题(envelope 核心;B5 qbank 落库的最小单元)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    anchor: Literal[
+        "architecture", "claims_vs_reality", "edge_case", "tradeoff", "guided"
+    ]
+    question: str = Field(min_length=1)
+    sub_prompts: list[str] = Field(default_factory=list, max_length=5)
+    answer_reference: AnswerReference
+    evidence: QuestionEvidence
+    time_minutes: int = Field(default=3, ge=1, le=15)
+
+
+class QuestionSet(BaseModel):
+    """一次调查产出的题集;questions 空 = skip(合法,#130)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_summary: str = ""
+    questions: list[InterviewQuestion] = Field(default_factory=list, max_length=6)
