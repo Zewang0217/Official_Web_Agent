@@ -2,8 +2,8 @@
 
 - 一总图两子图中的「评分子图」;调查子图(B3)与它平行
 - 确定性规则优先:任一打分维命中绝对卡 → 整份硬 0,不调模型(省钱+可测)
-- LLM 轨:model_strong + 低温 0.1 + 结构化输出(schema.py 契约,
-  function-calling 轨——openai-compatible 端点兼容,A 模块工具调用同轨)
+- LLM 轨:model_strong + 低温 0.1 + 提示词 JSON + strict Pydantic 校验
+  (检查点③实测:思考模式代理拒 json_schema 与强制 tool_choice)
 - 输出是**卡 dict**(schema evaluation_scorecard/v1),落库由调用方
   (state/evaluation.py,B2 接线)负责;本图纯计算无 DB IO
 """
@@ -117,10 +117,18 @@ async def finalize_hard(state: EvaluationState) -> dict:
     return {"card": card, "error": None}
 
 
+def _evidence_in(evidence: str, source: str) -> bool:
+    """证据逐字性:归一空白后 evidence 必须是原文子串(B1 评审 P1-2)。"""
+    def norm(s: str) -> str:
+        return "".join(s.split())
+    ev = norm(evidence)
+    return bool(ev) and ev in norm(source)
+
+
 async def llm_score(state: EvaluationState) -> dict:
     """结构化打分:逐维给分+依据+原文证据,态度判定;异常进 error(B2 可重试)。"""
-    settings = get_effective_settings()
     try:
+        settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
         # 结构化输出轨(检查点③实测拍板):当前代理的模型全是思考模式,
         # json_schema response_format 与强制 tool_choice 均被拒(400)——
@@ -141,8 +149,28 @@ async def llm_score(state: EvaluationState) -> dict:
             + ",".join(f["field_key"] for f in state["fields"])
         )
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])
-        content = resp.content if isinstance(resp.content, str) else str(resp.content)
+        raw = resp.content
+        if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
+            raw = "".join(
+                b.get("text", "") for b in raw if isinstance(b, dict)
+            )
+        content = raw if isinstance(raw, str) else str(raw)
         result = ScorecardOutput.model_validate_json(_extract_json(content))
+        # strict 后置校验(评审 P1):模型漏维/造维、证据非原文都属静默降级,
+        # 在这里翻进 error 态走 B2 重试,绝不落成"看起来完整"的卡
+        expected = [f["field_key"] for f in state["fields"]]
+        got = [d.field_key for d in result.dimensions]
+        if sorted(got) != sorted(expected):
+            raise ValueError(
+                f"维度集不完整:缺 {sorted(set(expected) - set(got))},"
+                f"多 {sorted(set(got) - set(expected))}"
+            )
+        sources = {f["field_key"]: f.get("value", "") for f in state["fields"]}
+        for d in result.dimensions:
+            if not _evidence_in(d.evidence, sources.get(d.field_key, "")):
+                raise ValueError(
+                    f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}"
+                )
         scores = {d.field_key: d.score for d in result.dimensions}
         card = {
             "schema": CARD_SCHEMA_VERSION,
@@ -169,8 +197,14 @@ async def finalize(state: EvaluationState) -> dict:
     return {}
 
 
+_compiled: Any | None = None
+
+
 def build_evaluation_subgraph() -> Any:
     """评分子图:START → precheck →(绝对卡? finalize_hard : llm_score)→ finalize → END。"""
+    global _compiled
+    if _compiled is not None:
+        return _compiled
     g = StateGraph(EvaluationState)
     g.add_node("precheck", precheck)
     g.add_node("llm_score", llm_score)
@@ -181,7 +215,8 @@ def build_evaluation_subgraph() -> Any:
     g.add_edge("llm_score", "finalize")
     g.add_edge("finalize_hard", "finalize")
     g.add_edge("finalize", END)
-    return g.compile()
+    _compiled = g.compile()
+    return _compiled
 
 
 async def run_evaluation(

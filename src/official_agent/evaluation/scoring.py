@@ -47,8 +47,10 @@ def is_hard_zero_value(
         or len(set(v)) == 1  # 111、。。。、aaa
         or bool(_PURE_DIGIT.fullmatch(v))
         or v in _PLACEHOLDER_EXACT
-        or v.startswith(_PLACEHOLDER_PREFIX)
-        or bool(ph and v == ph)  # 与配置的 placeholder 全等
+        or bool(ph and v == ph)  # 与配置的 placeholder 全等(最准)
+        # 前缀启发式仅在没有配置 placeholder 时兜底(评审 P2:先抄题再作答
+        # 会被误卡,有配置时全等判已覆盖)
+        or (not ph and v.startswith(_PLACEHOLDER_PREFIX))
         or bool(title and v == title.strip())  # 抄字段名本身
     )
 
@@ -58,11 +60,11 @@ def detect_hard_zero(fields: list[FieldText]) -> dict[str, str]:
     reasons: dict[str, str] = {}
     for f in fields:
         if is_hard_zero_value(f.value, title=f.title, placeholder=f.placeholder):
-            reasons[f.field_key] = _reason_of(f.value, f.title)
+            reasons[f.field_key] = _reason_of(f.value, f.title, placeholder=f.placeholder)
     return reasons
 
 
-def _reason_of(value: str, title: str) -> str:
+def _reason_of(value: str, title: str, placeholder: str = "") -> str:
     v = (value or "").strip()
     if not v:
         return "空白未填"
@@ -74,6 +76,8 @@ def _reason_of(value: str, title: str) -> str:
         return f"纯数字:{v[:8]!r}"
     if v in _PLACEHOLDER_EXACT:
         return f"敷衍词:{v!r}"
+    if placeholder and v == placeholder.strip():
+        return "placeholder 文案未改"
     if v.startswith(_PLACEHOLDER_PREFIX):
         return "placeholder 文案未改"
     if title and v == title.strip():

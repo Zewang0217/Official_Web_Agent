@@ -25,7 +25,9 @@ class DimensionScore(BaseModel):
     field_key: str = Field(min_length=1, description="简历字段键(周期配置驱动)")
     score: int = Field(ge=0, le=100)
     rationale: str = Field(min_length=1, description="为什么给这个分")
-    evidence: str = Field(min_length=1, description="该维原文句,逐字引用")
+    evidence: str = Field(
+        min_length=1, max_length=120, description="该维原文句,逐字引用"
+    )
 
 
 class AttitudeVerdict(BaseModel):

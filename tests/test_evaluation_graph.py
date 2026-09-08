@@ -1,5 +1,6 @@
 """B1 评分子图测试:硬 0 短路不调模型 / 正常路径结构化输出 / 失败进 error。"""
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -124,3 +125,44 @@ async def test_temperature_low_on_scorer() -> None:
     ):
         await ev.run_evaluation(_FIELDS[:1], resume_id=4, cycle_id=2026)
     assert captured["temperature"] == ev.SCORING_TEMPERATURE
+
+
+def test_extract_json_tolerates_fences_and_noise() -> None:
+    """评审 P2:围栏/前导杂文/尾随杂文都能截出 JSON 主体。"""
+    assert ev._extract_json('```json\n{"a": 1}\n```') == '{"a": 1}'
+    assert ev._extract_json('好的,以下是结果:\n{"a": 1}') == '{"a": 1}'
+    tail = '以下是结果:\n{"a": 1}\n注:权重仅供参考}'
+    assert ev._extract_json(tail) == '{"a": 1}\n注:权重仅供参考}'  # rfind 边界:截到最外层
+    with pytest.raises(ValueError, match="不含 JSON"):
+        ev._extract_json("模型打摆了,没有 JSON")
+
+
+def test_dimension_incompleteness_raises() -> None:
+    """评审 P1-1:模型漏维 → error 态,绝不落'看起来完整'的卡。"""
+    bad = (
+        '{"dimensions": [{"field_key": "intro", "score": 80, '
+        '"rationale": "r", "evidence": "做过两个 Web 项目"}],'
+        '"attitude": {"verdict": "sincere", "reason": "r"}}'
+    )
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
+        patch.object(ev, "get_effective_settings", _settings),
+        pytest.raises(RuntimeError, match="维度集不完整"),
+    ):
+        asyncio.run(ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026))
+
+
+def test_fabricated_evidence_raises() -> None:
+    """评审 P1-2:证据非原文 → error 态(编造证据不得落卡)。"""
+    bad = (
+        '{"dimensions": ['
+        '{"field_key": "intro", "score": 80, "rationale": "r", "evidence": "我获得过图灵奖"},'
+        '{"field_key": "reason", "score": 40, "rationale": "r", "evidence": "认同社团氛围"}],'
+        '"attitude": {"verdict": "sincere", "reason": "r"}}'
+    )
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
+        patch.object(ev, "get_effective_settings", _settings),
+        pytest.raises(RuntimeError, match="证据非原文"),
+    ):
+        asyncio.run(ev.run_evaluation(_FIELDS, resume_id=6, cycle_id=2026))

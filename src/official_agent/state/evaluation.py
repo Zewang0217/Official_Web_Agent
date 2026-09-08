@@ -63,34 +63,43 @@ def save_scorecard(
     hard_zero/total 从卡内冗余提列,供队列过滤(0 分队列)与列表免解 JSONB。
     返回本次 card_version。
     """
-    with _conn() as conn:
-        ensure_evaluation_tables(conn)
-        row = conn.execute(
-            "SELECT COALESCE(MAX(card_version), 0) AS v "
-            "FROM evaluation_scorecard WHERE resume_id = %s AND cycle_id = %s",
-            (resume_id, cycle_id),
-        ).fetchone()
-        version = (row["v"] if row else 0) + 1
-        conn.execute(
-            """
-            INSERT INTO evaluation_scorecard
-                (resume_id, cycle_id, card_version, status, hard_zero, total,
-                 card, prompt_version)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                resume_id,
-                cycle_id,
-                version,
-                _STATUS_DRAFT,
-                bool(card.get("hard_zero", False)),
-                card.get("total"),
-                # 卡 JSONB(ensure_ascii=False,评审面板直读中文)
-                json.dumps(card, ensure_ascii=False),
-                prompt_version,
-            ),
-        )
-    return version
+    # MAX+1 读改写有并发窗口(同简历并发重触发,B2 评审 P2):撞唯一键重读重试
+    import psycopg  # 局部导入避免模块头堆依赖语义
+
+    for attempt in range(2):
+        try:
+            with _conn() as conn:
+                ensure_evaluation_tables(conn)
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(card_version), 0) AS v "
+                    "FROM evaluation_scorecard WHERE resume_id = %s AND cycle_id = %s",
+                    (resume_id, cycle_id),
+                ).fetchone()
+                version = (row["v"] if row else 0) + 1
+                conn.execute(
+                    """
+                    INSERT INTO evaluation_scorecard
+                        (resume_id, cycle_id, card_version, status, hard_zero, total,
+                         card, prompt_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        resume_id,
+                        cycle_id,
+                        version,
+                        _STATUS_DRAFT,
+                        bool(card.get("hard_zero", False)),
+                        card.get("total"),
+                        # 卡 JSONB(ensure_ascii=False,评审面板直读中文)
+                        json.dumps(card, ensure_ascii=False),
+                        prompt_version,
+                    ),
+                )
+            return version
+        except psycopg.errors.UniqueViolation:
+            if attempt:
+                raise
+    raise RuntimeError("unreachable")
 
 
 def latest_scorecard(resume_id: int, cycle_id: int) -> dict[str, Any] | None:
