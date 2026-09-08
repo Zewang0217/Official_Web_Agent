@@ -383,3 +383,61 @@ def test_kb_reembed_reuses_stored_content(
 
     missing = client.post("/api/agent/admin/kb/sources/nope/reembed", headers=_AUTH)
     assert missing.status_code == 404
+
+
+def test_kb_create_embedding_endpoint_error_502(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """embedding 端点失败 → 502 固定文案(评审 P1:不回显端点 URL/响应体)。"""
+    from official_agent.kb.embedding import EmbeddingError
+    from official_agent.web import kb_admin
+
+    _install_resolve(monkeypatch, _kb_admin_identity())
+
+    async def _boom(source, *, embedder=None, source_id=None):
+        raise EmbeddingError("HTTP 502: http://internal-emb/v1 <secret>")
+
+    monkeypatch.setattr(kb_admin.kb_store, "ingest_source", _boom)
+    resp = client.post(
+        "/api/agent/admin/kb/sources",
+        headers=_AUTH,
+        json={"title": "x", "type": "doc", "content_md": "正文"},
+    )
+    assert resp.status_code == 502
+    assert "internal-emb" not in resp.json()["detail"]  # 基础设施细节不出境
+    assert "暂时不可用" in resp.json()["detail"]
+
+
+def test_kb_create_schema_error_500_generic_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """schema 失败 → 500 固定文案(不回显 psycopg/扩展细节)。"""
+    from official_agent.kb.schema import KbSchemaError
+    from official_agent.web import kb_admin
+
+    _install_resolve(monkeypatch, _kb_admin_identity())
+
+    async def _boom(source, *, embedder=None, source_id=None):
+        raise KbSchemaError("pgvector 扩展不可用 ... host=10.0.0.1")
+
+    monkeypatch.setattr(kb_admin.kb_store, "ingest_source", _boom)
+    resp = client.post(
+        "/api/agent/admin/kb/sources",
+        headers=_AUTH,
+        json={"title": "x", "type": "doc", "content_md": "正文"},
+    )
+    assert resp.status_code == 500
+    assert "10.0.0.1" not in resp.json()["detail"]
+
+
+def test_kb_upsert_field_length_capped(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """长度上限收敛滥用面(评审 P2):超长 title → 422。"""
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    resp = client.post(
+        "/api/agent/admin/kb/sources",
+        headers=_AUTH,
+        json={"title": "长" * 201, "type": "doc", "content_md": "正文"},
+    )
+    assert resp.status_code == 422

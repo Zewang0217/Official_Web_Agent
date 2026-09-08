@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import logging
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
 
@@ -20,6 +21,8 @@ from official_agent.kb.embedding import EmbeddingError, EmbeddingNotConfiguredEr
 from official_agent.kb.schema import KbSchemaError
 from official_agent.kb.store import KbValidationError
 from official_agent.web.routes import _authenticate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -36,15 +39,19 @@ async def _require_kb_manage(
 
 
 class KbSourceUpsert(BaseModel):
-    """创建/更新知识条目。type=faq 必须 question/answer;type=doc 必须 content_md。"""
+    """创建/更新知识条目。type=faq 必须 question/answer;type=doc 必须 content_md。
 
-    title: str = Field(min_length=1)
+    长度上限是滥用面收敛(直通 embedding 成本与 pgvector 写入),给得宽松;
+    上限来源:chat 消息上限同量级。
+    """
+
+    title: str = Field(min_length=1, max_length=200)
     type: Literal["faq", "doc"]
     kind: Literal["normal", "test"] = "normal"
-    tags: list[str] = Field(default_factory=list)
-    question: str = ""
-    answer: str = ""
-    content_md: str = ""
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    question: str = Field(default="", max_length=4000)
+    answer: str = Field(default="", max_length=20000)
+    content_md: str = Field(default="", max_length=20000)
 
 
 class KbEnabledBody(BaseModel):
@@ -70,16 +77,27 @@ def _to_input(body: KbSourceUpsert, identity: ResolvedIdentity) -> kb_store.Sour
 
 
 def _map_store_error(exc: Exception) -> HTTPException:
-    """store/embedding 异常 → HTTP 语义(测试/前端只见状态码+detail)。"""
+    """store/embedding 异常 → HTTP 语义。
+
+    detail 只给可操作文案,不回显异常原文(评审 P1:psycopg 原文带内网
+    连接信息、embedding 异常带端点 URL;kb:manage 可单独授权给纯知识运营,
+    不该见基础设施细节)。原异常落服务端日志。
+    """
     if isinstance(exc, KbValidationError):
-        return HTTPException(status_code=400, detail=str(exc))
+        return HTTPException(status_code=400, detail=str(exc))  # 我们的文案,安全
     if isinstance(exc, EmbeddingNotConfiguredError):
-        return HTTPException(status_code=503, detail=str(exc))
+        return HTTPException(
+            status_code=503,
+            detail="知识库 embedding 未配置,请联系管理员在 .env 配置 EMBED_*",
+        )
     if isinstance(exc, EmbeddingError):
-        return HTTPException(status_code=502, detail=str(exc))
+        logger.warning("KB embedding 端点失败:%s", exc, exc_info=True)
+        return HTTPException(status_code=502, detail="知识库 embedding 端点暂时不可用,请稍后重试")
     if isinstance(exc, KbSchemaError):
-        return HTTPException(status_code=500, detail=str(exc))
-    return HTTPException(status_code=500, detail=f"KB 操作失败:{exc}")
+        logger.exception("KB schema 初始化失败")
+        return HTTPException(status_code=500, detail="知识库存储初始化失败,请联系管理员")
+    logger.exception("KB 操作失败")
+    return HTTPException(status_code=500, detail="知识库操作失败,请稍后重试")
 
 
 @router.get("/admin/kb/sources")
@@ -120,7 +138,10 @@ async def get_kb_source(
     _: Annotated[ResolvedIdentity, Depends(_require_kb_manage)],
 ) -> dict[str, Any]:
     """详情(含 faq/doc 内容与块数)。"""
-    record = await asyncio.to_thread(kb_store.get_source, source_id)
+    try:
+        record = await asyncio.to_thread(kb_store.get_source, source_id)
+    except Exception as exc:  # noqa: BLE001 — 统一映射
+        raise _map_store_error(exc) from exc
     if record is None:
         raise HTTPException(status_code=404, detail="条目不存在")
     return asdict(record)
@@ -132,8 +153,15 @@ async def update_kb_source(
     body: KbSourceUpsert,
     identity: Annotated[ResolvedIdentity, Depends(_require_kb_manage)],
 ) -> dict[str, Any]:
-    """更新并重嵌(条目级增量;内容表整体替换,faq↔doc 迁移安全)。"""
-    exists = await asyncio.to_thread(kb_store.get_source, source_id)
+    """更新并重嵌(条目级增量;内容表整体替换,faq↔doc 迁移安全)。
+
+    已知竞态(管理面低危):404 预检与写入之间条目若被并发删除,
+    upsert 会复活它(评审 P2 记录;store 层条件写属后续票)。
+    """
+    try:
+        exists = await asyncio.to_thread(kb_store.get_source, source_id)
+    except Exception as exc:  # noqa: BLE001 — 统一映射
+        raise _map_store_error(exc) from exc
     if not exists:
         raise HTTPException(status_code=404, detail="条目不存在")
     try:
@@ -185,7 +213,10 @@ async def reembed_kb_source(
     identity: Annotated[ResolvedIdentity, Depends(_require_kb_manage)],
 ) -> dict[str, Any]:
     """按已存内容重建向量(重跑分块+embedding;换模型后逐条补齐)。"""
-    record = await asyncio.to_thread(kb_store.get_source, source_id)
+    try:
+        record = await asyncio.to_thread(kb_store.get_source, source_id)
+    except Exception as exc:  # noqa: BLE001 — 统一映射
+        raise _map_store_error(exc) from exc
     if record is None:
         raise HTTPException(status_code=404, detail="条目不存在")
     source = kb_store.SourceInput(
