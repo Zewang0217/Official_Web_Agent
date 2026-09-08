@@ -56,6 +56,8 @@ class SourceRecord:
     answer: str = ""
     content_md: str = ""
     chunk_count: int = 0
+    created_at: Any = None
+    updated_at: Any = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +302,8 @@ def _record(
         answer=content.get("answer", ""),
         content_md=content.get("content_md", ""),
         chunk_count=chunk_count,
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
     )
 
 
