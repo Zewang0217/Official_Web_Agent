@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from official_agent.evaluation import runner as eval_runner
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.state import evaluation
+from official_agent.state import qbank as qbank_store
 from official_agent.web.routes import _authenticate
 
 router = APIRouter()
@@ -83,3 +84,89 @@ async def retry_failed_jobs(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="重试失败,请稍后重试") from exc
     return {"retried": job_ids}
+
+
+# ── B5 预置题库(/admin/evaluation/qbank):面试官挑题面(#127/#128) ──
+
+
+def _require_any(*codes: str):
+    """任一权限码通过即放行(qbank 面:面试官 interview:evaluate / 评审 resume:audit)。"""
+
+    async def _dep(
+        request: Request, authorization: Annotated[str | None, Header()] = None
+    ):
+        identity, _ = await _authenticate(request, authorization)
+        owned = identity.get("permission_codes") or []
+        if not any(c in owned for c in codes):
+            raise HTTPException(
+                status_code=403, detail=f"需要 {' 或 '.join(codes)} 权限"
+            )
+        return identity
+
+    return _dep
+
+
+class PickBody(BaseModel):
+    resume_id: int = Field(ge=1)
+    cycle_id: int = Field(ge=1)
+    schedule_id: int | None = None
+    questions: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+
+
+@router.get("/admin/evaluation/qbank")
+async def get_qbank(
+    identity: Annotated[
+        ResolvedIdentity, Depends(_require_any("interview:evaluate", "resume:audit"))
+    ],
+    resume_id: int,
+    cycle_id: int,
+) -> dict[str, Any]:
+    """某候选最新预置题库(面试官面试前预查/打分工作台抽屉)。"""
+    try:
+        row = await asyncio.to_thread(qbank_store.latest_qbank, resume_id, cycle_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="该候选暂无预置题库")
+    return row
+
+
+@router.post("/admin/evaluation/qbank/pick", status_code=201)
+async def pick_questions(
+    body: PickBody,
+    identity: Annotated[
+        ResolvedIdentity, Depends(_require_any("interview:evaluate", "resume:audit"))
+    ],
+) -> dict[str, Any]:
+    """记录面试官实际勾选的题(pick log;候选人永不可见)。"""
+    picked = 0
+    try:
+        for q in body.questions:
+            await asyncio.to_thread(
+                qbank_store.record_pick,
+                resume_id=body.resume_id,
+                cycle_id=body.cycle_id,
+                interviewer_user_id=int(identity.get("user_id") or 0),
+                question_ref=q,
+                schedule_id=body.schedule_id,
+            )
+            picked += 1
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="记录勾选失败,请稍后重试") from exc
+    return {"picked": picked}
+
+
+@router.get("/admin/evaluation/qbank/picks")
+async def list_question_picks(
+    _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    resume_id: int,
+    cycle_id: int,
+) -> dict[str, Any]:
+    """勾选记录(resume:audit 管理面;反哺出题覆盖率分析)。"""
+    try:
+        picks = await asyncio.to_thread(
+            qbank_store.list_picks, resume_id, cycle_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="查询勾选失败,请稍后重试") from exc
+    return {"items": picks, "total": len(picks)}
