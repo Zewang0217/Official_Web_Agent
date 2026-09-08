@@ -60,21 +60,30 @@ class GitHubClient:
             for item in data
         ]
 
-    async def tree_paths(self, owner: str, repo: str, *, limit: int = 400) -> list[str]:
-        """默认分支文件路径清单(truncated 时截断到 limit)。"""
-        meta = await self.repo(owner, repo)
-        branch = meta.get("default_branch") or "main"
+    async def tree_paths(
+        self, owner: str, repo: str, *, branch: str | None = None, limit: int = 600
+    ) -> tuple[list[str], bool]:
+        """文件路径清单;返回 (paths, truncated)。
+
+        truncated=True 表示 GitHub 递归树被截断——路径白名单不完整,
+        调用方(路径真实性校验)必须放宽,否则 full-app 仓会误判编造。
+        branch 由调用方传入可省一次 repo() 调用(匿名配额 60/h,能省则省)。
+        """
+        if not branch:
+            meta = await self.repo(owner, repo)
+            branch = meta.get("default_branch") or "main"
         data = await self._get_json(
             f"/repos/{owner}/{repo}/git/trees/{branch}", params={"recursive": "1"}
         )
         if not isinstance(data, dict):
-            return []
+            return [], False
         paths = [
             item["path"]
             for item in data.get("tree", [])
             if item.get("type") == "blob"
         ]
-        return paths[:limit]
+        truncated = bool(data.get("truncated")) or len(paths) > limit
+        return paths[:limit], truncated
 
     async def _get_json(self, path: str, params: dict | None = None) -> dict | list:
         url = f"{self._base}{path}"
@@ -83,9 +92,11 @@ class GitHubClient:
                 resp = await client.get(url, headers=self._headers(), params=params)
         except httpx.HTTPError as exc:
             raise GitHubUnavailable(f"GitHub 连接失败:{exc}") from exc
-        if resp.status_code in (401, 403, 404):
-            # 403 含限流;对路由而言都等价于"此仓不可读"
-            raise GitHubUnavailable(f"GitHub {resp.status_code}")
         if resp.status_code != 200:
+            # 401/403(含限流)/404 与其余错误码,对路由都等价"此仓不可读"
             raise GitHubUnavailable(f"GitHub {resp.status_code}")
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:
+            # 200+非 JSON(代理劫持/门户页)在大陆网络并不罕见——同样按不可读降级
+            raise GitHubUnavailable("GitHub 返回非 JSON 响应") from exc

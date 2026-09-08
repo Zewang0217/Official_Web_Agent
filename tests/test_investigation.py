@@ -70,7 +70,8 @@ async def test_client_happy_paths() -> None:
     assert "Demo" in await client.readme("o", "r")
     commits = await client.commits("o", "r")
     assert commits[0]["message"] == "feat: x"
-    assert await client.tree_paths("o", "r") == ["src/app.py"]
+    paths, truncated = await client.tree_paths("o", "r", branch="main")
+    assert paths == ["src/app.py"] and truncated is False
 
 
 @respx.mock
@@ -106,7 +107,7 @@ class _FakeGH:
         pass
 
     async def repo(self, owner, repo):
-        return {"default_branch": "main"}
+        return {"default_branch": "main"}  # route 探测;fetch 复用 branch
 
     async def readme(self, owner, repo):
         return "# Demo\n" + "x" * 600
@@ -114,19 +115,28 @@ class _FakeGH:
     async def commits(self, owner, repo, per_page=30):
         return [{"message": f"feat: {i}", "date": "2026-01-01"} for i in range(12)]
 
-    async def tree_paths(self, owner, repo, limit=400):
-        return ["README.md", "src/app.py", "tests/test_app.py"]
+    async def tree_paths(self, owner, repo, *, branch=None, limit=600):
+        return ["README.md", "src/app.py", "tests/test_app.py"], False
+
+
+def _q(anchor: str, path: str, text: str) -> str:
+    return (
+        f'{{"anchor": "{anchor}", "question": "{text}", "sub_prompts": [],'
+        f'"answer_reference": {{"strong": "s", "acceptable": "a", "weak": "w"}},'
+        f'"evidence": {{"path": "{path}", "note": "n"}}, "time_minutes": 3}}'
+    )
 
 
 _GOOD_JSON = (
-    '{"repo_summary": "社团官网,活跃",'
-    '"questions": [{'
-    '"anchor": "architecture",'
-    '"question": "报名页的前端状态是怎么管理的?",'
-    '"sub_prompts": ["为什么选这个方案"],'
-    '"answer_reference": {"strong": "讲清状态流转", "acceptable": "能说出方案", "weak": "答不上"},'
-    '"evidence": {"path": "src/app.py", "note": "主入口"},'
-    '"time_minutes": 3}]}'
+    '{"repo_summary": "社团官网,活跃", "questions": ['
+    + _q("architecture", "src/app.py", "报名页的前端状态是怎么管理的?")
+    + ","
+    + _q("claims_vs_reality", "README.md", "自述独立完成重构,仓库哪里能体现?")
+    + ","
+    + _q("edge_case", "tests/test_app.py", "表单提交并发冲突怎么处理?")
+    + ","
+    + _q("tradeoff", "src/app.py", "现在重写你会改哪个架构决定?")
+    + "]}"
 )
 
 
@@ -211,3 +221,101 @@ async def test_deep_dive_fabricated_path_rejected(monkeypatch) -> None:
     )
     with pytest.raises(RuntimeError, match="不在仓内"):
         await ig.run_investigation("项目 https://github.com/me/demo")
+
+
+def test_repo_regex_boundaries() -> None:
+    """B3 评审 P2:句点收尾/伪站名不误配不误粘。"""
+    assert inv.extract_repo("项目是 github.com/owner/repo.") == ("owner", "repo")
+    assert inv.extract_repo("看 mygithub.com/owner/repo 这个") is None
+    assert inv.extract_repo("github.com/owner/repo.git 已归档") == ("owner", "repo")
+
+
+def test_worthiness_low_tier() -> None:
+    """low 档:少量信号 → 2 题。"""
+    assert (
+        inv.repo_worthiness(
+            readme_chars=800, commit_count=5, paths=["a.py", "b.py"]
+        )
+        == "low"
+    )
+    assert inv.WORTHINESS_QUESTION_COUNT["low"] == 2
+
+
+@pytest.mark.asyncio
+async def test_worthiness_none_skips_llm(monkeypatch) -> None:
+    """零信号仓不出题也不调模型(B3 评审 P1:值得度不被提示词架空)。"""
+
+    class _BareGH(_FakeGH):
+        async def readme(self, owner, repo):
+            return ""
+
+        async def commits(self, owner, repo, per_page=30):
+            return []
+
+        async def tree_paths(self, owner, repo, *, branch=None, limit=600):
+            return ["a.py"], False
+
+    monkeypatch.setattr(ig, "GitHubClient", _BareGH)
+
+    def _boom(*a, **k):
+        raise AssertionError("零信号不得调模型")
+
+    monkeypatch.setattr(ig, "build_model", _boom)
+
+    class _S:
+        model_strong = "test-strong"
+
+    monkeypatch.setattr(ig, "get_effective_settings", _S)
+    qs = await ig.run_investigation("项目 https://github.com/me/bare 空仓")
+    assert qs["mode"] == "repo_deep_dive" and qs["questions"] == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_midway_failure_degrades_to_guided(monkeypatch) -> None:
+    """B3 评审 P2:route 探测通过但 fetch 中途失败 → 降级 guided + 注明。"""
+
+    class _MidwayGH(_FakeGH):
+        async def readme(self, owner, repo):
+            raise GitHubUnavailable("GitHub 403")
+
+    monkeypatch.setattr(ig, "GitHubClient", _MidwayGH)
+
+    class _Msg:
+        content = (
+            '{"repo_summary": "",'
+            '"questions": [{"anchor": "guided", "question": "自述的重构你承担了哪些?",'
+            '"sub_prompts": [],'
+            '"answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},'
+            '"evidence": {"path": "", "note": "仓不可读,通用引导"},'
+            '"time_minutes": 3}]}'
+        )
+
+    class _M:
+        async def ainvoke(self, messages):
+            return _Msg()
+
+    class _S:
+        model_strong = "test-strong"
+
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _M())
+    monkeypatch.setattr(ig, "get_effective_settings", _S)
+
+    qs = await ig.run_investigation("我做了 github.com/me/demo 官网重构,React 技术栈")
+    assert qs["mode"] == "guided"
+    assert qs["questions"][0]["evidence"]["path"] == ""
+
+
+@pytest.mark.asyncio
+async def test_count_mismatch_rejected(monkeypatch) -> None:
+    """B3 评审 P1:题数不符硬校验——high 档必须恰好 4 题。"""
+    _install_fake_gh_and_model(monkeypatch, _GOOD_JSON.replace("time_minutes\": 3}]}",
+                                                               "time_minutes\": 3}]}"))
+    # _GOOD_JSON 恰好 4 题 → 通过;只给 1 题的旧 payload → 拒
+    one_q = (
+        '{"repo_summary": "x", "questions": ['
+        + _q("architecture", "src/app.py", "架构?")
+        + "]}"
+    )
+    _install_fake_gh_and_model(monkeypatch, one_q)
+    with pytest.raises(RuntimeError, match="题数不符"):
+        await ig.run_investigation("项目 https://github.com/me/demo 报名页")

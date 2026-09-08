@@ -79,13 +79,19 @@ class InterviewQuestion(BaseModel):
     sub_prompts: list[str] = Field(default_factory=list, max_length=5)
     answer_reference: AnswerReference
     evidence: QuestionEvidence
-    time_minutes: int = Field(default=3, ge=1, le=15)
+    time_minutes: int = Field(default=3, ge=2, le=5)
 
 
 class QuestionSet(BaseModel):
-    """一次调查产出的题集;questions 空 = skip(合法,#130)。"""
+    """一次调查产出的题集;questions 空 = skip/零信号(合法,#130)。
+
+    mode/prompt_version 是信封字段(非模型输出,生成后注入)——类型化进
+    schema,让 B5 qbank 拿到的形状可通过自身校验(B3 评审 P2)。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     repo_summary: str = ""
     questions: list[InterviewQuestion] = Field(default_factory=list, max_length=6)
+    mode: Literal["repo_deep_dive", "guided", "skipped"] | None = None
+    prompt_version: str = ""

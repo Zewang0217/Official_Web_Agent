@@ -13,8 +13,12 @@ from typing import Literal
 
 # 项目维字段键的语义匹配(周期配置驱动,键名不稳定,按 label/键名猜)
 _PROJECT_HINTS = ("project", "项目")
-# 仓库 URL:github.com/owner/repo(容忍 .git 后缀与尾随标点)
-_REPO_URL = re.compile(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", re.IGNORECASE)
+# 仓库 URL:github.com/owner/repo。左断言防 "mygithub.com" 伪站;
+# repo 段含 . 但捕获后剥尾随标点("repo." 句点收尾是常见书写)
+_REPO_URL = re.compile(
+    r"(?<![A-Za-z0-9-])github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)",
+    re.IGNORECASE,
+)
 
 # 有实质内容的最短长度(#130「短文本但说了做了什么」)
 _MIN_SUBSTANTIVE = 24
@@ -31,6 +35,9 @@ def extract_repo(text: str) -> tuple[str, str] | None:
     owner, repo = m.group(1), m.group(2)
     if repo.lower().endswith(".git"):
         repo = repo[:-4]
+    repo = repo.rstrip(".,;:)!?}]")  # 尾随标点是书写标点,不属于仓名
+    if not owner or not repo:
+        return None
     return owner, repo
 
 
