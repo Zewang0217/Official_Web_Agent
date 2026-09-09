@@ -84,7 +84,7 @@ def repo_worthiness(
     return "none"
 
 
-WORTHINESS_QUESTION_COUNT = {"none": 0, "low": 2, "high": 4}
+WORTHINESS_QUESTION_COUNT = {"none": 0, "low": 2, "high": 5}  # high=概况2+模块3
 
 
 def build_repo_brief(

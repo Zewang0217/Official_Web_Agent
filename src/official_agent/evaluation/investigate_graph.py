@@ -137,13 +137,20 @@ async def generate_node(state: InvestigationState) -> dict:
                 or "仓库不可读/未提供;仅依据候选人自述出通用项目引导题"
             )
         )
+        part_note = (
+            "题分两部分:Part 1 两道项目概况题(anchor=overview 与 "
+            "tech_rationale,part=1);"
+            if deep
+            else "Part 1 一道项目概况题(anchor=overview,part=1);"
+        )
         prompt_text = (
             load_prompt(PROMPT_FILE)
-            + "\n\n---\n\n候选人自述:\n"
+            + "\n\n---\n\n候选人材料:\n"
             + state["project_text"]
             + "\n\n仓库材料:\n"
             + brief
-            + f"\n\n必须恰好出 {count} 道题,多一题少一题都不合格。"
+            + f"\n\n{part_note}其余为 Part 2 模块分析题(anchor=module_design/"
+            "tradeoff/edge_case,part=2)。"
             + (
                 "每题 evidence.path 必须是上面文件结构里真实存在的路径。"
                 if deep
@@ -170,14 +177,19 @@ async def generate_node(state: InvestigationState) -> dict:
             content = raw if isinstance(raw, str) else str(raw)
             try:
                 result = QuestionSet.model_validate_json(_extract_json(content))
-                # strict 后置校验(P1 同款):题数/锚/路径三重一致性
+                # strict 后置校验(P1 同款):题数/锚/路径/两部分四重一致性
                 if deep and len(result.questions) != count:
                     raise ValueError(
                         f"题数不符:要求 {count},模型给 {len(result.questions)}"
                     )
                 if not deep and len(result.questions) > 2:
                     raise ValueError(f"引导题超量:{len(result.questions)}")
-                anchors: set[str] = set()
+                if deep:
+                    if result.repo_overview is None:
+                        raise ValueError("缺 repo_overview(AI 初判)")
+                    parts = {q.part for q in result.questions}
+                    if parts != {1, 2}:
+                        raise ValueError(f"两部分缺一:parts={sorted(parts)}")
                 for q in result.questions:
                     if deep:
                         if not q.evidence.path:
@@ -191,11 +203,8 @@ async def generate_node(state: InvestigationState) -> dict:
                             )
                         if q.anchor == "guided":
                             raise ValueError("deep_dive 题不得用 guided 锚")
-                        anchors.add(q.anchor)
                     elif q.evidence.path:
                         raise ValueError("guided 题不应带仓路径")
-                if deep and count == 4 and len(anchors) != 4:
-                    raise ValueError("high 值得度应四锚各一题")
                 last_err = None
                 break
             except ValueError as ve:
@@ -204,7 +213,7 @@ async def generate_node(state: InvestigationState) -> dict:
                 corrective = (
                     f"\n\n【纠正】你上一次的输出不合规:{ve}"
                     "\n请修正后重新输出完整 JSON(evidence.path 必须是上面"
-                    "文件结构里逐字真实的路径)。"
+                    "文件结构里逐字真实的路径;deep_dive 题分 Part 1/2 两部分)。"
                 )
         if result is None or last_err is not None:
             raise ValueError(f"两次输出均不合规:{last_err}")
@@ -216,7 +225,10 @@ async def generate_node(state: InvestigationState) -> dict:
 def _dump(result: QuestionSet, deep: bool) -> dict[str, Any]:
     result.mode = "repo_deep_dive" if deep else "guided"
     result.prompt_version = _prompt_version()
-    return result.model_dump()
+    data = result.model_dump()
+    if result.repo_overview:
+        data["repo_overview"] = result.repo_overview.model_dump()
+    return data
 
 
 async def skip_node(state: InvestigationState) -> dict:

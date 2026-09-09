@@ -68,12 +68,19 @@ class AnswerReference(BaseModel):
 
 
 class InterviewQuestion(BaseModel):
-    """单道预置面试题(envelope 核心;B5 qbank 落库的最小单元)。"""
+    """单道预置面试题(envelope 核心;B5 qbank 落库的最小单元)。
+
+    part:1=项目概况(是什么/技术选型),2=模块分析(设计哲学/权衡/边界)。
+    锚点采用中性问法(不预设候选人自述):「为什么选取这个技术栈」
+    「这个模块为什么这么设计」——而非「你自述了 X」式先入为主问法
+    (用户 2026-09-09 反馈)。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    part: Literal[1, 2] = 2
     anchor: Literal[
-        "architecture", "claims_vs_reality", "edge_case", "tradeoff", "guided"
+        "overview", "tech_rationale", "module_design", "tradeoff", "edge_case", "guided"
     ]
     question: str = Field(min_length=1)
     sub_prompts: list[str] = Field(default_factory=list, max_length=5)
@@ -82,16 +89,31 @@ class InterviewQuestion(BaseModel):
     time_minutes: int = Field(default=3, ge=2, le=5)
 
 
+class RepoOverview(BaseModel):
+    """AI 对仓库的初步评判(给面试官看,不问候选人)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    what: str = Field(min_length=1, description="这个项目是什么、解决什么问题")
+    tech_stack: str = Field(min_length=1, description="实际技术栈(以仓库为准)")
+    structure_note: str = Field(description="目录/文件结构概览")
+    highlights: list[str] = Field(default_factory=list, max_length=5)
+    risks: list[str] = Field(default_factory=list, max_length=5)
+    ai_assessment: str = Field(min_length=1, description="AI 初判:值得深挖的点与原因")
+
+
 class QuestionSet(BaseModel):
     """一次调查产出的题集;questions 空 = skip/零信号(合法,#130)。
 
-    mode/prompt_version 是信封字段(非模型输出,生成后注入)——类型化进
-    schema,让 B5 qbank 拿到的形状可通过自身校验(B3 评审 P2)。
+    两部分结构(用户 2026-09-09 反馈):
+    - Part 1 项目概况:是什么/为什么做/为什么选这个技术栈
+    - Part 2 模块分析:锚定真实文件,追问「为什么这么设计/什么设计哲学」
+    mode/prompt_version 是信封字段(非模型输出,生成后注入)。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    repo_summary: str = ""
-    questions: list[InterviewQuestion] = Field(default_factory=list, max_length=6)
+    repo_overview: RepoOverview | None = None
+    questions: list[InterviewQuestion] = Field(default_factory=list, max_length=8)
     mode: Literal["repo_deep_dive", "guided", "skipped"] | None = None
     prompt_version: str = ""

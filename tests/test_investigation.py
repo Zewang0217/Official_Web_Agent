@@ -33,7 +33,7 @@ def test_worthiness_tiers() -> None:
     )
     none = inv.repo_worthiness(readme_chars=10, commit_count=1, paths=["a.py"])
     assert high == "high" and none == "none"
-    assert inv.WORTHINESS_QUESTION_COUNT["high"] == 4
+    assert inv.WORTHINESS_QUESTION_COUNT["high"] == 5  # 概况 2 + 模块分析 3
     assert inv.WORTHINESS_QUESTION_COUNT["none"] == 0
 
 
@@ -119,23 +119,27 @@ class _FakeGH:
         return ["README.md", "src/app.py", "tests/test_app.py"], False
 
 
-def _q(anchor: str, path: str, text: str) -> str:
+def _q(part: int, anchor: str, path: str, text: str) -> str:
     return (
-        f'{{"anchor": "{anchor}", "question": "{text}", "sub_prompts": [],'
+        f'{{"part": {part}, "anchor": "{anchor}", "question": "{text}", "sub_prompts": [],'
         f'"answer_reference": {{"strong": "s", "acceptable": "a", "weak": "w"}},'
         f'"evidence": {{"path": "{path}", "note": "n"}}, "time_minutes": 3}}'
     )
 
 
 _GOOD_JSON = (
-    '{"repo_summary": "社团官网,活跃", "questions": ['
-    + _q("architecture", "src/app.py", "报名页的前端状态是怎么管理的?")
+    '{"repo_overview": {"what": "社团官网与 Agent", "tech_stack": "TS",'
+    ' "structure_note": "src 分层", "highlights": ["有测试"], "risks": [],'
+    ' "ai_assessment": "值得深挖架构"}, "questions": ['
+    + _q(1, "overview", "README.md", "这个项目是什么、解决什么问题?")
     + ","
-    + _q("claims_vs_reality", "README.md", "自述独立完成重构,仓库哪里能体现?")
+    + _q(1, "tech_rationale", "src/app.py", "为什么选 TypeScript?")
     + ","
-    + _q("edge_case", "tests/test_app.py", "表单提交并发冲突怎么处理?")
+    + _q(2, "module_design", "tests/test_app.py", "核心模块怎么划分职责?")
     + ","
-    + _q("tradeoff", "src/app.py", "现在重写你会改哪个架构决定?")
+    + _q(2, "tradeoff", "src/app.py", "现在的架构取舍是什么?")
+    + ","
+    + _q(2, "edge_case", "tests/test_app.py", "如果输入非法会怎样?")
     + "]}"
 )
 
@@ -163,7 +167,8 @@ async def test_deep_dive_happy_path(monkeypatch) -> None:
     _install_fake_gh_and_model(monkeypatch, _GOOD_JSON)
     qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
     assert qs["mode"] == "repo_deep_dive"
-    assert qs["questions"][0]["evidence"]["path"] == "src/app.py"  # 路径真实在仓
+    assert qs["questions"][0]["evidence"]["path"] == "README.md"  # 路径真实在仓
+    assert qs["repo_overview"]["ai_assessment"]  # AI 初判随卡下发
 
 
 @pytest.mark.asyncio
@@ -178,8 +183,7 @@ async def test_probe_failure_degrades_to_guided(monkeypatch) -> None:
 
     class _Msg:
         content = (
-            '{"repo_summary": "",'
-            '"questions": [{"anchor": "guided", "question": "项目里你承担了什么?",'
+            '{"questions": [{"anchor": "guided", "question": "项目里你承担了什么?",'
             '"sub_prompts": [],'
             '"answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},'
             '"evidence": {"path": "", "note": "仓不可读,通用引导"},'
@@ -282,8 +286,7 @@ async def test_fetch_midway_failure_degrades_to_guided(monkeypatch) -> None:
 
     class _Msg:
         content = (
-            '{"repo_summary": "",'
-            '"questions": [{"anchor": "guided", "question": "自述的重构你承担了哪些?",'
+            '{"questions": [{"anchor": "guided", "question": "自述的重构你承担了哪些?",'
             '"sub_prompts": [],'
             '"answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},'
             '"evidence": {"path": "", "note": "仓不可读,通用引导"},'
@@ -312,8 +315,9 @@ async def test_count_mismatch_rejected(monkeypatch) -> None:
                                                                "time_minutes\": 3}]}"))
     # _GOOD_JSON 恰好 4 题 → 通过;只给 1 题的旧 payload → 拒
     one_q = (
-        '{"repo_summary": "x", "questions": ['
-        + _q("architecture", "src/app.py", "架构?")
+        '{"repo_overview": {"what": "x", "tech_stack": "t", "structure_note": "s",'
+        ' "highlights": [], "risks": [], "ai_assessment": "a"}, "questions": ['
+        + _q(1, "overview", "README.md", "架构?")
         + "]}"
     )
     _install_fake_gh_and_model(monkeypatch, one_q)
