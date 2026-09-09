@@ -248,3 +248,12 @@ class JudgeReport(BaseModel):
 
     dimensions: list[JudgeDimensionScore] = Field(min_length=4, max_length=4)
     overall: str = ""
+
+    from pydantic import model_validator
+
+    @model_validator(mode="after")
+    def _four_distinct_dimensions(self) -> "JudgeReport":
+        dims = [d.dimension for d in self.dimensions]
+        if len(set(dims)) != 4:
+            raise ValueError(f"四维必须互异且齐全:{dims}")
+        return self
