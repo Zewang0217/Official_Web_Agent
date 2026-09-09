@@ -301,7 +301,13 @@ async def test_bundle_aggregates_explore_usage(monkeypatch) -> None:
 
     monkeypatch.setattr(bd.ig, "run_investigation", _deep)
     envelope = await bd.run_bundle(
-        [FieldText(field_key="project", title="项目", value="项目 https://github.com/me/demo 做了很多")],
+        [
+            FieldText(
+                field_key="project",
+                title="项目",
+                value="项目 https://github.com/me/demo 做了很多",
+            )
+        ],
         resume_id=9,
         cycle_id=2026,
     )
