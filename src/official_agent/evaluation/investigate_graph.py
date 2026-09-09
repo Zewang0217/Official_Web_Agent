@@ -20,20 +20,19 @@ from official_agent.evaluation.attribution import (
     detect_contribution_target,
     resolve_entry,
 )
+from official_agent.evaluation.explore import run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import (
     WORTHINESS_QUESTION_COUNT,
-    build_repo_brief,
     extract_repo,
-    repo_worthiness,
     route_project,
 )
 from official_agent.evaluation.schema import QuestionSet
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 
-PROMPT_FILE = "evaluation_investigate.md"
+PROMPT_FILE = "evaluation_grilling.md"
 SCORING_TEMPERATURE = 0.2
 
 
@@ -50,7 +49,7 @@ class InvestigationState(TypedDict, total=False):
     repo_owner: str
     repo_name: str
     default_branch: str
-    repo_brief: str
+    dossier_text: str
     attribution: dict
     paths: list[str]
     paths_truncated: bool
@@ -164,32 +163,44 @@ def route_after_route(state: InvestigationState) -> str:
     return state["route"]  # deep_dive | guided | skip
 
 
-async def fetch_node(state: InvestigationState) -> dict:
-    """取 README+提交+文件树 → 简报与值得度;不可达则降级 guided(#130)。"""
-    client = GitHubClient(
-        base_url=state.get("github_base") or "https://api.github.com",
-        token=state.get("github_token") or "",
+async def explore_node(state: InvestigationState) -> dict:
+    """探索段(B-AG3 #151):受限 ReAct 循环产出 dossier,替换 fetch_node 固定取材。
+
+    - 预算四闸在 explore_repo 内(轮数/墙钟/client 截断/dossier 40K);触顶标
+      degraded,用已有材料出题(D7,不判失败)。
+    - dossier 为空 = GitHub 不可达/探索全败 → 降级 guided(spec §3.4)。
+    - worthiness 信号仅用于题数分档(D10:退役是 #152 schema v2 的事)。
+    """
+    attribution_dict = state.get("attribution") or {}
+    attribution = str(attribution_dict.get("level", ""))
+    dossier = await run_explore(
+        state["project_text"],
+        owner=state["repo_owner"],
+        name=state["repo_name"],
+        attribution=attribution,
+        login=state.get("candidate_login", ""),
+        github_base=state.get("github_base") or "https://api.github.com",
+        github_token=state.get("github_token") or "",
     )
-    try:
-        owner, name = state["repo_owner"], state["repo_name"]
-        readme = await client.readme(owner, name)
-        commits = await client.commits(owner, name)
-        paths, tree_truncated = await client.tree_paths(
-            owner, name, branch=state.get("default_branch")
-        )
-    except GitHubUnavailable as exc:
+    if dossier.is_empty():
         return {
             "route": "guided",
             "error": None,
-            "repo_brief": f"仓库探测中途不可读({exc}),降级通用引导题",
+            "dossier_text": (
+                f"探索段未取得材料({dossier.degrade_reason or '无观察'}),降级通用引导题"
+            ),
         }
-    worthiness = repo_worthiness(
-        readme_chars=len(readme), commit_count=len(commits), paths=paths
-    )
+    if dossier.degraded:
+        # 预算触顶:用已有材料出题(D7),降级标记进材料头,题面可感知
+        degrade_note = f"[探索降级:{dossier.degrade_reason}]"
+        dossier_text = degrade_note + "\n\n" + dossier.render()
+    else:
+        dossier_text = dossier.render()
+    worthiness = "high" if dossier.total_chars >= 1500 else "low"
     return {
-        "repo_brief": build_repo_brief(readme=readme, commits=commits, paths=paths),
-        "paths": paths,
-        "paths_truncated": tree_truncated,
+        "dossier_text": dossier_text,
+        "paths": dossier.paths,
+        "paths_truncated": dossier.paths_truncated,
         "worthiness": worthiness,
         "error": None,
     }
@@ -215,11 +226,11 @@ async def generate_node(state: InvestigationState) -> dict:
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
         brief = (
-            state.get("repo_brief", "")
+            state.get("dossier_text", "")
             if deep
             else (
-                state.get("repo_brief", "")
-                or "仓库不可读/未提供;仅依据候选人自述出通用项目引导题"
+                state.get("dossier_text", "")
+                or "探索未取得材料;仅依据候选人自述出通用项目引导题"
             )
         )
         prompt_text = (
@@ -297,17 +308,17 @@ def build_investigation_subgraph() -> Any:
         return _compiled
     g = StateGraph(InvestigationState)
     g.add_node("route", route_node)
-    g.add_node("fetch", fetch_node)
+    g.add_node("explore", explore_node)
     g.add_node("generate", generate_node)
     g.add_node("skip", skip_node)
     g.add_node("finalize", finalize)
     g.set_entry_point("route")
     g.add_conditional_edges("route", route_after_route, {
-        "deep_dive": "fetch",
+        "deep_dive": "explore",
         "guided": "generate",
         "skip": "skip",
     })
-    g.add_edge("fetch", "generate")
+    g.add_edge("explore", "generate")
     g.add_edge("generate", "finalize")
     g.add_edge("skip", "finalize")
     g.add_edge("finalize", END)

@@ -153,7 +153,27 @@ _GOOD_JSON = (
 )
 
 
+def _install_fake_explore(monkeypatch, chars: int = 2000) -> None:
+    """探索段替身(#151):返回带材料与路径的 dossier,worthiness 由体量定。"""
+
+    from official_agent.evaluation.dossier import Dossier
+
+    def _fake_run_explore(project_text, **kw):
+        async def _impl():
+            d = Dossier(attribution=kw.get("attribution", ""))
+            d.add("C1_动机定位", "# Demo\n" + "x" * chars)
+            d.add("C3_架构分层", "README.md src/app.py tests/test_app.py")
+            d.paths = ["README.md", "src/app.py", "tests/test_app.py"]
+            d.turns_used = 2
+            return d
+
+        return _impl()
+
+    monkeypatch.setattr(ig, "run_explore", _fake_run_explore)
+
+
 def _install_fake_gh_and_model(monkeypatch, payload: str) -> None:
+    _install_fake_explore(monkeypatch)
     monkeypatch.setattr(ig, "GitHubClient", _FakeGH)
 
     class _Msg:
@@ -255,43 +275,62 @@ def test_worthiness_low_tier() -> None:
 
 
 @pytest.mark.asyncio
-async def test_worthiness_none_skips_llm(monkeypatch) -> None:
-    """零信号仓不出题也不调模型(B3 评审 P1:值得度不被提示词架空)。"""
+async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
+    """探索零材料 → guided 降级(§3.4:GitHub 不可达/探索全败,替代旧 worthiness=none)。"""
 
-    class _BareGH(_FakeGH):
-        async def readme(self, owner, repo):
-            return ""
+    def _fake_run_explore(project_text, **kw):
+        async def _impl():
+            from official_agent.evaluation.dossier import Dossier
 
-        async def commits(self, owner, repo, per_page=30):
-            return []
+            d = Dossier()
+            d.degraded = True
+            d.degrade_reason = "GitHub 不可达"
+            return d
 
-        async def tree_paths(self, owner, repo, *, branch=None, limit=600):
-            return ["a.py"], False
+        return _impl()
 
-    monkeypatch.setattr(ig, "GitHubClient", _BareGH)
+    monkeypatch.setattr(ig, "run_explore", _fake_run_explore)
 
-    def _boom(*a, **k):
-        raise AssertionError("零信号不得调模型")
+    class _Msg:
+        content = (
+            '{"repo_summary": "",'
+            '"questions": [{"anchor": "guided", "question": "项目里你承担了什么?",'
+            '"sub_prompts": [],'
+            '"answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},'
+            '"evidence": {"path": "", "note": "仓不可读,通用引导"},'
+            '"time_minutes": 3}]}'
+        )
 
-    monkeypatch.setattr(ig, "build_model", _boom)
+    class _M:
+        async def ainvoke(self, messages):
+            return _Msg()
+
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _M())
 
     class _S:
         model_strong = "test-strong"
 
     monkeypatch.setattr(ig, "get_effective_settings", _S)
     qs = await ig.run_investigation("项目 https://github.com/me/bare 空仓")
-    assert qs["mode"] == "repo_deep_dive" and qs["questions"] == []
+    assert qs["mode"] == "guided" and len(qs["questions"]) == 1
 
 
 @pytest.mark.asyncio
-async def test_fetch_midway_failure_degrades_to_guided(monkeypatch) -> None:
-    """B3 评审 P2:route 探测通过但 fetch 中途失败 → 降级 guided + 注明。"""
+async def test_explore_midway_failure_degrades_to_guided(monkeypatch) -> None:
+    """B3 评审 P2 → #151:route 探测通过但探索段全败 → 降级 guided + 注明。"""
 
-    class _MidwayGH(_FakeGH):
-        async def readme(self, owner, repo):
-            raise GitHubUnavailable("GitHub 403")
+    def _fake_run_explore(project_text, **kw):
+        async def _impl():
+            from official_agent.evaluation.dossier import Dossier
 
-    monkeypatch.setattr(ig, "GitHubClient", _MidwayGH)
+            d = Dossier()
+            d.degraded = True
+            d.degrade_reason = "GitHub 不可达: GitHub 403"
+            return d
+
+        return _impl()
+
+    monkeypatch.setattr(ig, "run_explore", _fake_run_explore)
 
     class _Msg:
         content = (
