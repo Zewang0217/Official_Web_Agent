@@ -4,6 +4,7 @@
 explore_repo,验证循环自身语义。
 """
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -364,3 +365,46 @@ async def test_deepseek_raw_token_usage_cache_captured() -> None:
     assert dossier.input_tokens == 1400
     assert dossier.cache_hit_tokens == 1150
     assert dossier.cache_miss_tokens == 250
+
+
+# ── #155:qbank_probes 探针 + judge schema ──
+
+
+@pytest.mark.asyncio
+async def test_qbank_probes_suite_runs_deterministic(tmp_path: Path) -> None:
+    """六探针经统一 runner 跑通(repo 组 v2 形状全过)。"""
+    import shutil
+
+    from official_agent.evals import qbank_probes as qp
+
+    src = Path(__file__).parents[1] / "evals" / "datasets" / "qbank_probes.yaml"
+    dst = tmp_path / "qbank_probes.yaml"
+    shutil.copy(src, dst)
+    result = await qp.run_suite(dst)
+    assert result.status == "PASS"
+    assert len(result.cases) >= 7
+
+
+def test_judge_report_schema_roundtrip() -> None:
+    from official_agent.evaluation.schema import JudgeReport
+
+    report = {
+        "dimensions": [
+            {"dimension": d, "score": s, "reason": "r"}
+            for d, s in zip(
+                ["relevance", "specificity", "fairness", "differentiation"],
+                [4, 3, 5, 3],
+                strict=True,
+            )
+        ],
+        "overall": "题组锚定扎实,具体性可再下钻",
+    }
+    parsed = JudgeReport.model_validate(report)
+    assert parsed.dimensions[0].score == 4
+    # 越界分拒绝
+    bad = dict(report)
+    bad["dimensions"] = [dict(d, score=6) for d in report["dimensions"]]
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        JudgeReport.model_validate(bad)

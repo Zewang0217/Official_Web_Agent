@@ -271,27 +271,12 @@ async def generate_node(state: InvestigationState) -> dict:
 
         deep = bool(deep)
         if deep:
-            _validate_group_v2(
-                group_payload, dossier_text, list(state.get("paths", []))
+            group = validate_qbank_v2_group(
+                group_payload,
+                dossier_text,
+                paths=list(state.get("paths", [])),
+                thin=thin,
             )
-            group = QuestionGroupV2.model_validate(
-                {k: group_payload[k] for k in ("entry", "chains", "reserves") if k in group_payload}
-            )
-            if thin and group.total_questions > 3:
-                raise ValueError(f"敷衍 dossier 题量越界:{group.total_questions} > 3")
-            if group.total_questions > 15:
-                raise ValueError(f"题量超硬顶:{group.total_questions} > 15")
-            if group.entry is None:
-                raise ValueError("deep_dive 缺入口题(D12:入口 1)")
-            if not group.entry.evidence.path and not group.entry.evidence.note:
-                raise ValueError("deep_dive 题空路径须有 evidence.note")
-            if len(group.chains) < 2:
-                raise ValueError(f"追问链不足:要求 2-4,模型给 {len(group.chains)}")
-            for chain in group.chains:
-                if not 3 <= len(chain.layers) <= 5:
-                    raise ValueError(
-                        f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)}"
-                    )
         else:
             # guided:entry 引导题,chains 空;黑名单与「不带仓路径」不变量仍适用
             guided_view = {
@@ -390,6 +375,39 @@ def _validate_group_v2(
     entry = payload.get("entry") or {}
     _check_question(str(entry.get("question", "")))
     _check_path(str((entry.get("evidence") or {}).get("path", "")), "entry")
+
+
+def validate_qbank_v2_group(
+    group_payload: dict[str, Any],
+    dossier_text: str,
+    *,
+    paths: list[str],
+    thin: bool = False,
+) -> QuestionGroupV2:
+    """题组 v2 全量校验(#155 探针与 generate 共用;六探针的判定机器)。
+
+    - 对抗前提黑名单/路径白名单/链源真实性(_validate_group_v2);
+    - 结构(D12):入口 1 + 链 2-4×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3。
+    返回校验过的 QuestionGroupV2;违例 ValueError(→ generate error 态重试)。
+    """
+    _validate_group_v2(group_payload, dossier_text, paths)
+    group = QuestionGroupV2.model_validate(
+        {k: group_payload[k] for k in ("entry", "chains", "reserves") if k in group_payload}
+    )
+    if thin and group.total_questions > 3:
+        raise ValueError(f"敷衍 dossier 题量越界:{group.total_questions} > 3")
+    if group.total_questions > 15:
+        raise ValueError(f"题量超硬顶:{group.total_questions} > 15")
+    if group.entry is None:
+        raise ValueError("deep_dive 缺入口题(D12:入口 1)")
+    if not group.entry.evidence.path and not group.entry.evidence.note:
+        raise ValueError("deep_dive 题空路径须有 evidence.note")
+    if len(group.chains) < 2:
+        raise ValueError(f"追问链不足:要求 2-4,模型给 {len(group.chains)}")
+    for chain in group.chains:
+        if not 3 <= len(chain.layers) <= 5:
+            raise ValueError(f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)}")
+    return group
 
 
 def _attribution_level(level: Any) -> Any:

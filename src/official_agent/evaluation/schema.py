@@ -222,3 +222,29 @@ class QbankV2(BaseModel):
     explore_meta: ExploreMeta = Field(default_factory=ExploreMeta)
     generation_usage: UsageMeta | None = None  # 出题段单次调用用量(#154)
     prompt_version: str = ""
+
+
+# ── LLM-as-judge 出题质量报告(#155/#62;首版只报告不阻塞) ──
+
+JUDGE_DIMENSION = Literal[
+    "relevance", "specificity", "fairness", "differentiation"
+]
+
+
+class JudgeDimensionScore(BaseModel):
+    """judge 单维评分:1-5 分 + 引用具体题目的理由。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimension: JUDGE_DIMENSION
+    score: int = Field(ge=1, le=5)
+    reason: str = Field(min_length=1)
+
+
+class JudgeReport(BaseModel):
+    """judge 报告整体;阈值等 AG8(#156)校准后才转门禁。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimensions: list[JudgeDimensionScore] = Field(min_length=4, max_length=4)
+    overall: str = ""
