@@ -160,7 +160,7 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
         fields, resume_id=9, cycle_id=2026, github_key="usergithub"
     )
     groups = {g["group"]: g for g in envelope["groups"]}
-    assert groups["repo"]["mode"] == "skipped"
+    assert groups["repo"]["qbank_v2"]["mode"] == "skipped"  # #153:v2 信封嵌套
     assert "autograding" not in groups  # 无评测记录 → 线不存在
     fallback = groups["base_and_skills"]
     assert len(fallback["questions"]) >= 3 + 2  # 基础三维 + 技能题组
@@ -202,3 +202,69 @@ async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
     assert called == [("me", "web"), ("me", "api")]
     repo_groups = [g for g in envelope["groups"] if g["group"] == "repo"]
     assert [g["repo"] for g in repo_groups] == ["me/web", "me/api"]
+
+
+@pytest.mark.asyncio
+async def test_bundle_repo_v2_envelope_end_to_end(monkeypatch) -> None:
+    """#153 评审 P0 回归:repo 组 v2 信封经 run_bundle 主路径——
+    all_questions 收集为 dict(suggest_plan 不崩)、total 计数、kind 不被覆盖。"""
+    fields = [
+        FieldText(
+            field_key="project",
+            title="项目经历",
+            value="项目 https://github.com/me/demo 做了很多事",
+        ),
+    ]
+
+    async def _deep_investigation(text, **kw):
+        # 生产形状:generate_node 产出的 QbankV2 dump(含 group 键 dict)
+        return {
+            "schema_name": "evaluation_qbank/v2",
+            "repo_summary": "社团管理系统",
+            "group": {
+                "entry": {
+                    "category": "C1_背景与动机",
+                    "question": "为什么做这个系统?",
+                    "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                    "evidence": {"path": "README.md", "note": "n"},
+                    "time_minutes": 3,
+                },
+                "chains": [
+                    {
+                        "category": "C4_实现细节拷打",
+                        "theme": "README.md 的接口层设计",
+                        "layers": [
+                            {"question": "L1?", "expected_signal": "s"},
+                            {"question": "L2?", "expected_signal": "s"},
+                            {"question": "L3?", "expected_signal": "s"},
+                        ],
+                    }
+                ],
+                "reserves": [],
+            },
+            "mode": "repo_deep_dive",
+            "attribution": "trusted-own",
+            "degraded": False,
+            "explore_meta": {"turns": 5, "dossier_chars": 800},
+            "prompt_version": "evaluation_grilling/v2",
+        }
+
+    monkeypatch.setattr(bd.ig, "run_investigation", _deep_investigation)
+
+    envelope = await bd.run_bundle(fields, resume_id=9, cycle_id=2026)
+    assert envelope["schema_name"] == "evaluation_qbank/v2"
+    # 评审 P0:suggest_plan 不再因 repo 题目是 str 而崩;计数=1 入口+3 层
+    assert envelope["total_questions"] == 4
+    assert sum(envelope["suggested_plan"]) <= 15
+    repo_group = next(g for g in envelope["groups"] if g["group"] == "repo")
+    assert repo_group["qbank_v2"]["attribution"] == "trusted-own"  # kind 字符串不被覆盖
+    # flatten 视图覆盖入口+链层
+    from official_agent.state.qbank import flatten_v2_pickable
+
+    flat = flatten_v2_pickable(envelope)
+    assert [f["role"] for f in flat if f["group_kind"] == "repo"] == [
+        "entry",
+        "chain",
+        "chain",
+        "chain",
+    ]

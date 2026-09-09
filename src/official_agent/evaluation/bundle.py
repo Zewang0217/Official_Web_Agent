@@ -104,7 +104,9 @@ async def run_bundle(
                     "group": "repo",
                     "owner": owner or "",
                     "repo": f"{owner}/{name}" if pinned else "",
-                    **repo_envelope,
+                    # #153:v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
+                    # group 键(dict),展开会覆盖 kind 字符串并污染 pick log
+                    "qbank_v2": repo_envelope,
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -172,8 +174,9 @@ async def run_bundle(
     # 兜底线(#133):仓线无题、无评测、无奖项 → 基础三维 + 部门技能题组。
     # #153:repo 组已 v2(题目在 group.entry/chains 里),证据判定两种形状都认
     def _group_has_evidence(g: dict[str, Any]) -> bool:
-        inner = g.get("group")
-        if isinstance(inner, dict):
+        qbank_v2 = g.get("qbank_v2")
+        if isinstance(qbank_v2, dict):
+            inner = qbank_v2.get("group") or {}
             return bool(inner.get("entry") or inner.get("chains"))
         return bool(g.get("questions"))
 
@@ -200,17 +203,32 @@ async def run_bundle(
             }
         )
 
-    all_questions = []
+    all_questions: list[dict[str, Any]] = []
     for g in groups:
-        inner = g.get("group")
-        if isinstance(inner, dict):
-            if inner.get("entry"):
-                all_questions.append(inner["entry"].get("question", ""))
+        qbank_v2 = g.get("qbank_v2")
+        if isinstance(qbank_v2, dict):
+            # repo v2 组:题目收集为 dict(带 time_minutes,suggest_plan 需要)
+            inner = qbank_v2.get("group") or {}
+            entry = inner.get("entry")
+            if entry:
+                all_questions.append(
+                    {
+                        "question": entry.get("question", ""),
+                        "time_minutes": entry.get("time_minutes", 3),
+                    }
+                )
             for chain in inner.get("chains", []):
                 for layer in chain.get("layers", []):
-                    all_questions.append(layer.get("question", ""))
+                    all_questions.append(
+                        {"question": layer.get("question", ""), "time_minutes": 3}
+                    )
             for reserve in inner.get("reserves", []):
-                all_questions.append(reserve.get("question", ""))
+                all_questions.append(
+                    {
+                        "question": reserve.get("question", ""),
+                        "time_minutes": reserve.get("time_minutes", 3),
+                    }
+                )
         else:
             all_questions.extend(g.get("questions", []))
     envelope = {

@@ -188,15 +188,16 @@ def flatten_v2_pickable(envelope: dict[str, Any]) -> list[dict[str, Any]]:
         return kw
 
     for gi, g in enumerate(envelope.get("groups", [])):
-        kind = str(g.get("group", ""))
-        # repo v2 组:entry/chains/reserves 直接在组顶层(kind 是字符串);
-        # 其余组(kind 字符串 + questions 列表)走旧扁平形状
+        kind_raw = g.get("group", "")
+        kind = kind_raw if isinstance(kind_raw, str) else "repo"
+        # repo v2 组(#153):题目在 qbank_v2.group{entry/chains/reserves}
+        qbank_v2 = g.get("qbank_v2")
         inner = (
-            g
-            if ("entry" in g or "chains" in g or "reserves" in g)
-            else (g.get("group") if isinstance(g.get("group"), dict) else None)
+            (qbank_v2 or {}).get("group")
+            if isinstance(qbank_v2, dict)
+            else (g if ("entry" in g or "chains" in g) else None)
         )
-        if inner is not None:
+        if isinstance(inner, dict):
             entry = inner.get("entry")
             if entry:
                 out.append(
