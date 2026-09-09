@@ -69,13 +69,19 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
 
 | Secret | 值 | 说明 |
 |---|---|---|
-| `DOCKERHUB_TOKEN` | 访问令牌 | 组织访问令牌(OAT)或有 org 推送权的个人令牌 |
-| `DOCKERHUB_USERNAME` | 令牌所属账号名 | **仅当 token 是个人令牌时需要**(如 `huayeding`);用 OAT 则不配,自动回退到 org 名 `boyuanclub` |
+| `DOCKERHUB_TOKEN` | 访问令牌 | `huayeding` 的个人访问令牌(Read & Write) |
+| `DOCKERHUB_LOGIN_USER` | 令牌所属账号名 | **通常不配** —— 登录账号与命名空间同为 `huayeding` 时自动回退即正确;仅在两者不同(如用组织令牌推 org 命名空间)时才需要 |
 | `DEPLOY_HOST_A` | `124.221.222.206` | agent 单实例固定在 Node A |
 | `DEPLOY_USER` | `official-boyuan-club` | 需在 docker 组、且拥有 `/opt/boyuan-agent`(含读 600 的 .env.prod) |
 | `DEPLOY_SSH_KEY` | 部署私钥 | 与后端同一把 |
 
-登录身份必须与 token 所属账号一致——个人令牌配 `username: boyuanclub` 会认证失败。
+登录身份必须与 token 所属账号一致——个人令牌配 `username: boyuanclub` 会认证失败
+(实测报 `insufficient_scope: authorization failed`)。
+
+**镜像命名空间为什么是 `huayeding` 而不是 `boyuanclub`**:后端镜像在 `boyuanclub`,
+但 `huayeding` 对该命名空间无推送权(实测),而 `boyuanclub` 的凭证暂不可得。将来
+拿到组织令牌可改回——需同时改 workflow 的 `DOCKER_NAMESPACE` 与服务器 `.env.prod`
+的 `DOCKERHUB_USERNAME`(compose 用它拼镜像名,与上表的登录身份是两回事)。
 
 ## 本地测试账号与种子数据
 
