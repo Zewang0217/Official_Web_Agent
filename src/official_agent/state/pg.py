@@ -18,6 +18,8 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC
+from typing import Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
@@ -51,3 +53,88 @@ async def get_checkpointer() -> AsyncIterator[AsyncPostgresSaver]:
         yield saver
     finally:
         await pool.close()
+
+
+# ── checkpointer 挂起载荷 24h TTL(#164;ADR-0007 挂起态清理) ──
+
+_CHECKPOINT_TABLES = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
+_INTERRUPT_CHANNEL = "__interrupt__"
+
+
+def _uuid_timestamp_age_hours(checkpoint_id: str, now: float) -> float | None:
+    """从 checkpoint id(UUID,langgraph 为时间有序变体)解析年龄(小时)。
+
+    解析失败返回 None(调用方跳过该行,宁可不删不可误删)。"""
+    import uuid
+    from datetime import datetime
+
+    try:
+        ts = uuid.UUID(checkpoint_id).time  # 100ns since 1582-10-15
+        created = datetime.fromtimestamp((ts - 0x01B21DD213814000) / 1e7, tz=UTC)
+        return (now - created.timestamp()) / 3600
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
+def purge_expired_interrupts(
+    *, max_age_hours: int = 24, conn: Any = None, dsn: str | None = None
+) -> int:
+    """清理挂起超时的 checkpointer 载荷(#164):require_confirmation 挂起的
+    会话超 24h 未恢复 → 删除该 thread 的 checkpoints/blobs/writes 三表行。
+
+    挂起判定:checkpoint_writes 存在 __interrupt__ 通道写入;年龄取该
+    thread 最新 checkpoint id 的时间戳(langgraph 时间有序 UUID,解析失败
+    跳过——宁可不删不可误删)。conn 可注入(测试);无 conn 时自建连接
+    (POSTGRES_URL)。返回清理的 thread 数;任何失败 fail-open 记日志
+    (清理 job 崩掉不能拖垮服务)。
+    """
+    import logging
+    import time as _time
+
+    import psycopg
+
+    now = _time.time()
+    own = conn is None
+    try:
+        if own:
+            from official_agent.config import get_settings
+
+            url = dsn or get_settings().postgres_url
+            url = url.replace("postgresql+psycopg://", "postgresql://")
+            conn = psycopg.connect(url)
+        assert conn is not None
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT thread_id FROM checkpoint_writes WHERE channel = %s",
+            (_INTERRUPT_CHANNEL,),
+        )
+        thread_ids = [r[0] for r in cur.fetchall()]
+        purged = 0
+        for tid in thread_ids:
+            cur.execute(
+                "SELECT max(checkpoint_id) FROM checkpoints WHERE thread_id = %s",
+                (tid,),
+            )
+            row = cur.fetchone()
+            cid = row[0] if row else None
+            if not cid:
+                continue
+            age = _uuid_timestamp_age_hours(str(cid), now)
+            if age is None or age < max_age_hours:
+                continue
+            for table in _CHECKPOINT_TABLES:
+                cur.execute(f"DELETE FROM {table} WHERE thread_id = %s", (tid,))
+            purged += 1
+        if own:
+            conn.commit()
+        if purged:
+            logging.getLogger(__name__).info(
+                "挂起载荷 TTL 清理:purge %d threads(>%dh 未恢复)", purged, max_age_hours
+            )
+        return purged
+    except Exception:  # noqa: BLE001 — 清理 job fail-open(#164)
+        logging.getLogger(__name__).warning("挂起载荷 TTL 清理失败(已忽略)", exc_info=True)
+        return 0
+    finally:
+        if own and conn is not None:
+            conn.close()

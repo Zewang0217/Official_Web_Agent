@@ -301,6 +301,9 @@ async def _run_turn(
             logging.getLogger(__name__).warning(
                 "guard_event guard_name=%s verdict=%s", "fabrication_empty_tools", verdict
             )
+        from official_agent.security.pii import mask_pii_output
+
+        final_reply, pii_trace = mask_pii_output(final_reply)
         if final_reply:
             console.print(final_reply, markup=False, highlight=False)
     console.print()

@@ -17,6 +17,13 @@ prompt 版本对比(ADR-0004):prompt 唯一权威是 prompts/ 文件 frontmatter
 Langfuse 只读镜像;同步脚本待 prompt 体系落地后随 GRA 任务补。
 """
 
+# ── PII 红线(#164 出口契约)──────────────────────────────────
+# trace 上报面(Langfuse callbacks)的数据前提:进模型上下文的工具返回
+# 已在工具层 mask_pii_deep 就地脱敏(#115 P0-3/#164);**完整简历原文类
+# payload 禁入 trace**——新增上报字段前必须先过 security/pii.py 出口
+# 契约表,缺一即红线。
+
+
 import contextvars
 import hashlib
 import logging

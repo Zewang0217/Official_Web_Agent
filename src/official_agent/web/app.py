@@ -12,6 +12,8 @@ get_checkpointer / threads 建档 —— agent 进程内直连工具函数,不�
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -43,7 +45,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_audit_table()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
-        yield
+
+        # #164:挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
+        purge_stop = asyncio.Event()
+
+        async def _purge_loop() -> None:
+            from official_agent.state.pg import purge_expired_interrupts
+
+            while not purge_stop.is_set():
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(purge_expired_interrupts, max_age_hours=24)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(purge_stop.wait(), timeout=6 * 3600)
+
+        purge_task = asyncio.create_task(_purge_loop())
+        try:
+            yield
+        finally:
+            purge_stop.set()
+            purge_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await purge_task
 
 
 def create_app() -> FastAPI:
