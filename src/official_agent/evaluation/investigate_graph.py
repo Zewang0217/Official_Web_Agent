@@ -55,6 +55,7 @@ class InvestigationState(TypedDict, total=False):
     dossier_degraded: bool
     dossier_degrade_reason: str
     dossier_turns: int
+    explore_usage: dict
     attribution: dict
     paths: list[str]
     paths_truncated: bool
@@ -210,6 +211,12 @@ async def explore_node(state: InvestigationState) -> dict:
         "dossier_degraded": dossier.degraded,
         "dossier_degrade_reason": dossier.degrade_reason,
         "dossier_turns": dossier.turns_used,
+        "explore_usage": {
+            "input_tokens": dossier.input_tokens,
+            "output_tokens": dossier.output_tokens,
+            "cache_hit_tokens": dossier.cache_hit_tokens,
+            "cache_miss_tokens": dossier.cache_miss_tokens,
+        },
         "error": None,
     }
 
@@ -313,6 +320,7 @@ async def generate_node(state: InvestigationState) -> dict:
             explore_meta=ExploreMeta(
                 turns=int(state.get("dossier_turns", 0)),
                 dossier_chars=len(dossier_text),
+                **(state.get("explore_usage") or {}),
             ),
             prompt_version=_prompt_version(),
         )

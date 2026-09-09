@@ -31,6 +31,34 @@ class TriggerItem:
     user_id: int
 
 
+def _write_eval_usage_log(
+    *,
+    job_id: int,
+    job_user_id: int | None,
+    resume_id: int,
+    cycle_id: int,
+    qbank_version: int,
+    usage: dict,
+) -> None:
+    """eval 通道用量日志(#154/D9):thread_id 关联 job;四列 token 进 M6 面板。
+
+    fail-open:日志写失败不拖垮 job(与审计同语义)。"""
+    try:
+        from official_agent.state.conversation import write_conversation
+
+        write_conversation(
+            thread_id=f"eval:{job_id}",
+            user_id=job_user_id,
+            channel="evaluation",
+            user_message=f"简历 {resume_id} 初筛+题库(周期 {cycle_id})",
+            reply_summary=f"题库 v{qbank_version} 落库",
+            tools=["explore", "grilling"],
+            **(usage or {}),
+        )
+    except Exception:  # noqa: BLE001 — 用量日志缺失可容忍
+        logging.getLogger(__name__).warning("eval 用量日志写入失败", exc_info=True)
+
+
 async def fetch_candidate_github(user_id: int) -> str:
     """从候选档案取 github 登录名(D17/#149):GET /api/admin/profiles/{userId}
     → detail.github(地址或裸登录名)→ 归一化为登录名。
@@ -165,13 +193,29 @@ class EvaluationRunner:
                         github_key=await fetch_candidate_github(job["user_id"]) or None,
                         github_token=get_effective_settings().github_token,
                     )
-                    await asyncio.to_thread(
+                    qbank_version = await asyncio.to_thread(
                         qbank_store.save_qbank,
                         resume_id=resume_id,
                         cycle_id=cycle_id,
-                        source=str(envelope.get("groups", [{}])[0].get("group", "bundle")),
+                        source=(
+                            str(envelope["groups"][0].get("group", "bundle"))
+                            if envelope.get("groups")
+                            else "bundle"
+                        ),
                         envelope=envelope,
                         prompt_version=str(envelope.get("prompt_version", "")),
+                    )
+                    # D9/#154:探索+出题用量进 conversation_log(evaluation 通道,
+                    # 关联 job;复用 M6 #113 四列管道,不新建表)
+                    usage_total = envelope.get("explore_usage_total") or {}
+                    await asyncio.to_thread(
+                        _write_eval_usage_log,
+                        job_id=job_id,
+                        job_user_id=job.get("user_id"),
+                        resume_id=resume_id,
+                        cycle_id=cycle_id,
+                        qbank_version=qbank_version,
+                        usage=usage_total,
                     )
                 except Exception:  # noqa: BLE001 — 题库线失败不拖垮评分卡
                     logging.getLogger(__name__).warning(

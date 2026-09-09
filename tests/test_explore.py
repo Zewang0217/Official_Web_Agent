@@ -254,3 +254,59 @@ async def test_unknown_tool_reports_observation() -> None:
         client=_FakeClient(), model=model,  # type: ignore[arg-type]
     )
     assert not dossier.degraded  # 幻觉工具名不炸循环
+
+
+@pytest.mark.asyncio
+async def test_usage_tokens_accumulated_d9() -> None:
+    """D9/#154:逐调用 usage_metadata 累计(含 cache hit/miss)进 dossier。"""
+
+    class _UsageModel:
+        def __init__(self):
+            self.seen: list = []
+            self.n = 0
+
+        def bind_tools(self, tools: Any, **kwargs: Any):
+            return self
+
+        async def ainvoke(self, messages: list):
+            self.seen.append(list(messages))
+            self.n += 1
+            tool_call = self.n == 1
+            msg = (
+                AIMessage(
+                    "",
+                    tool_calls=[{"name": "repo_meta", "args": {}, "id": "c1"}],
+                    usage_metadata={
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "total_tokens": 120,
+                        "input_token_details": {"cache_read": 60, "cache_creation": 10},
+                    },
+                )
+                if tool_call
+                else AIMessage(
+                    "done",
+                    usage_metadata={
+                        "input_tokens": 50,
+                        "output_tokens": 10,
+                        "total_tokens": 60,
+                        "input_token_details": {"cache_read": 40, "cache_creation": 5},
+                    },
+                )
+            )
+            return msg
+
+    model = _UsageModel()
+    dossier = await explore_repo(
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+    )
+    assert dossier.input_tokens == 150
+    assert dossier.output_tokens == 30
+    assert dossier.cache_hit_tokens == 100
+    assert dossier.cache_miss_tokens == 15

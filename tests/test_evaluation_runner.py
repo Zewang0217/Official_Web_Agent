@@ -244,3 +244,65 @@ async def test_failure_marks_full_timeline_and_audits() -> None:
     assert [m[0] for m in marks] == ["running", "failed"]
     assert audit_calls == ["scorecard_generated"] or audit_calls == []  # 失败路径无完成审计
     assert marks[-1][0] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
+    """#154/D9:job 完成后 evaluation 通道用量日志落 conversation_log(关联 job)。"""
+
+    seen: dict = {}
+
+    async def _fetch(user_id, cycle_id):
+        return 99, _fields()
+
+    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None):
+        return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
+
+    def _save(card, *, resume_id, cycle_id, prompt_version):
+        return 1
+
+    def _mark(job_id, status, **kw):
+        return True
+
+    async def _fetch_github(user_id):
+        return "someuser"
+
+    async def _bundle(fields, **kw):
+        return {
+            "schema_name": "evaluation_qbank/v2",
+            "groups": [],
+            "explore_usage_total": {
+                "input_tokens": 150,
+                "output_tokens": 30,
+                "cache_hit_tokens": 100,
+                "cache_miss_tokens": 15,
+            },
+            "prompt_version": "t",
+        }
+
+    def _write_conversation(**kw):
+        seen["log"] = kw
+
+    monkeypatch.setattr(ev_runner, "fetch_scoring_fields", _fetch)
+    monkeypatch.setattr(ev_runner, "run_evaluation", _run_evaluation)
+    monkeypatch.setattr(ev_runner.evaluation, "save_scorecard", lambda *a, **k: 1)
+    monkeypatch.setattr(ev_runner.evaluation, "mark_job", lambda *a, **k: True)
+    monkeypatch.setattr(
+        ev_runner.evaluation, "get_job", lambda jid: {"job_id": jid, "user_id": 42}
+    )
+    monkeypatch.setattr(ev_runner.audit, "write_audit", lambda **k: None)
+    monkeypatch.setattr(ev_runner.asyncio, "to_thread", _fake_to_thread([]))
+    monkeypatch.setattr(ev_runner, "fetch_candidate_github", _fetch_github)
+    monkeypatch.setattr("official_agent.evaluation.bundle.run_bundle", _bundle)
+    monkeypatch.setattr(
+        "official_agent.state.qbank.save_qbank", lambda **k: 3  # 版本 3
+    )
+    monkeypatch.setattr("official_agent.state.conversation.write_conversation", _write_conversation)
+
+    runner = EvaluationRunner()
+    await runner._run_job(1, 2026, trigger_user_id=9)
+    log = seen["log"]
+    assert log["channel"] == "evaluation"
+    assert log["thread_id"] == "eval:1"  # 关联 job
+    assert log["input_tokens"] == 150
+    assert log["cache_hit_tokens"] == 100

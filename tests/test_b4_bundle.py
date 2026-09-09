@@ -268,3 +268,43 @@ async def test_bundle_repo_v2_envelope_end_to_end(monkeypatch) -> None:
         "chain",
         "chain",
     ]
+
+
+@pytest.mark.asyncio
+async def test_bundle_aggregates_explore_usage(monkeypatch) -> None:
+    """#154/D9:bundle 聚合 repo 组 explore_meta 用量进信封。"""
+
+    async def _deep(text, **kw):
+        return {
+            "schema_name": "evaluation_qbank/v2",
+            "repo_summary": "s",
+            "group": {
+                "entry": {"category": "C1_背景与动机", "question": "q?",
+                          "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                          "evidence": {"path": "", "note": ""}, "time_minutes": 3},
+                "chains": [],
+                "reserves": [],
+            },
+            "mode": "repo_deep_dive",
+            "attribution": "trusted-own",
+            "degraded": False,
+            "explore_meta": {
+                "turns": 3,
+                "dossier_chars": 500,
+                "input_tokens": 500,
+                "output_tokens": 80,
+                "cache_hit_tokens": 200,
+                "cache_miss_tokens": 300,
+            },
+            "prompt_version": "evaluation_grilling/v2",
+        }
+
+    monkeypatch.setattr(bd.ig, "run_investigation", _deep)
+    envelope = await bd.run_bundle(
+        [FieldText(field_key="project", title="项目", value="项目 https://github.com/me/demo 做了很多")],
+        resume_id=9,
+        cycle_id=2026,
+    )
+    usage = envelope["explore_usage_total"]
+    assert usage["input_tokens"] == 500
+    assert usage["cache_hit_tokens"] == 200

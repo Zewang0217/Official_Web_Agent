@@ -231,11 +231,25 @@ async def run_bundle(
                 )
         else:
             all_questions.extend(g.get("questions", []))
+    # D9/#154:聚合 repo 组探索/出题用量(其余线 v1 形状无用量面)
+    usage_total: dict[str, int | None] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_hit_tokens": None,
+        "cache_miss_tokens": None,
+    }
+    for g in groups:
+        meta = (g.get("qbank_v2") or {}).get("explore_meta") or {}
+        for k in usage_total:
+            v = meta.get(k)
+            if v is not None:
+                usage_total[k] = (usage_total[k] or 0) + int(v)
     envelope = {
         "schema_name": "evaluation_qbank/v2",
         "groups": groups,
         "suggested_plan": suggest_plan(all_questions, budget_minutes=15),
         "total_questions": len(all_questions),
+        "explore_usage_total": usage_total,
         "prompt_version": _prompt_version(),
     }
     return envelope

@@ -164,6 +164,8 @@ async def explore_repo(
     start = time.monotonic()
     input_tokens = 0
     output_tokens = 0
+    cache_hit = 0
+    cache_miss = 0
     turn = 0
     try:
         while turn < MAX_TURNS:
@@ -187,9 +189,17 @@ async def explore_repo(
                 model.ainvoke(messages), timeout=max(remaining, 1.0)
             )
             messages.append(response)
-            usage = getattr(response, "usage_metadata", None) or {}
-            input_tokens += int(usage.get("input_tokens") or 0)
-            output_tokens += int(usage.get("output_tokens") or 0)
+            # D9/#154:extract_usage 统一解析(含 DeepSeek prompt_cache 命中/未命中)
+            from official_agent.state.conversation import extract_usage
+
+            usage = extract_usage(
+                getattr(response, "usage_metadata", None)
+                or (getattr(response, "response_metadata", None) or {}).get("token_usage")
+            )
+            input_tokens += usage.get("input_tokens") or 0
+            output_tokens += usage.get("output_tokens") or 0
+            cache_hit += usage.get("cache_hit_tokens") or 0
+            cache_miss += usage.get("cache_miss_tokens") or 0
             tool_calls = getattr(response, "tool_calls", None) or []
             if not tool_calls:
                 break  # 材料自认充分,正常终止
@@ -262,6 +272,8 @@ async def explore_repo(
     dossier.turns_used = turn
     dossier.input_tokens = input_tokens or None
     dossier.output_tokens = output_tokens or None
+    dossier.cache_hit_tokens = cache_hit or None
+    dossier.cache_miss_tokens = cache_miss or None
     return dossier
 
 

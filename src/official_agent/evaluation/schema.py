@@ -177,7 +177,9 @@ class QuestionGroupV2(BaseModel):
 
 
 class ExploreMeta(BaseModel):
-    """探索段元信息(可观测/可展示;D9 用量管道接 M6)。"""
+    """探索段元信息(可观测/可展示;D9 用量管道接 M6,#154)。
+
+    cache 命中/未命中取 DeepSeek prompt_cache 语义(extract_usage)。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -185,6 +187,8 @@ class ExploreMeta(BaseModel):
     dossier_chars: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_hit_tokens: int | None = None
+    cache_miss_tokens: int | None = None
 
 
 class QbankV2(BaseModel):
