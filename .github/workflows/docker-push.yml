@@ -19,7 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DOCKER_USERNAME: boyuanclub
+  # 镜像命名空间(与后端 boyuanclub/official-core-api 同 org)
+  DOCKER_NAMESPACE: boyuanclub
   IMAGE_NAME: official-agent
   # agent 单实例固定在 Node A(进程内会话表 _sessions 是单机语义,#116;
   # 会话层外置后才能多副本)。故不做 B→A 滚动,只部署 A。
@@ -56,10 +57,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 登录身份与镜像命名空间是两件事:token 属于谁,username 就得填谁。
+      # 组织访问令牌(OAT)填 org 名;个人令牌填个人用户名(该用户需有 org 推送权)。
+      # 未配 DOCKERHUB_USERNAME 时回退到命名空间本身(= 后端现行做法)。
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ env.DOCKER_USERNAME }}
+          username: ${{ secrets.DOCKERHUB_USERNAME || env.DOCKER_NAMESPACE }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # 版本号:tag 触发用 tag 本身,push 触发在 Docker Hub 现有最大 SemVer 上 +1
@@ -69,7 +73,7 @@ jobs:
           if [[ "${{ github.ref_type }}" == 'tag' ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           else
-            RESPONSE=$(curl -s "https://hub.docker.com/v2/repositories/${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}/tags?page_size=100")
+            RESPONSE=$(curl -s "https://hub.docker.com/v2/repositories/${{ env.DOCKER_NAMESPACE }}/${{ env.IMAGE_NAME }}/tags?page_size=100")
             LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.results[]?.name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
             if [[ -z "$LATEST_VERSION" ]] || [[ "$LATEST_VERSION" == "null" ]]; then
               LATEST_VERSION="0.0.0"
@@ -90,8 +94,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.DOCKER_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.DOCKER_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -148,7 +152,7 @@ jobs:
               $DC logs --tail=40 agent >&2 || true
               if [ -n "$PREV" ]; then
                 echo "回滚到上一镜像 $PREV" >&2
-                docker tag "$PREV" ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+                docker tag "$PREV" ${{ env.DOCKER_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
                 $DC up -d --no-build agent
                 for i in $(seq 1 12); do
                   curl -fsS -m 5 http://127.0.0.1:8001/health | grep -q '"status":"ok"' && { echo "回滚后已恢复"; break; }

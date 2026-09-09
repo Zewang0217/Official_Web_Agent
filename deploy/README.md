@@ -65,6 +65,18 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
 - 回滚:`AGENT_VERSION=<上一 tag> docker compose --env-file .env.prod -f docker-compose.prod.yml up -d`。
 - 限流:nginx `limit_req_zone/limit_req` 与 agent 层位置均已预留,参数等 #56/SEC-05。
 
+## CI/CD 需要的 GitHub Secrets(agent 仓库)
+
+| Secret | 值 | 说明 |
+|---|---|---|
+| `DOCKERHUB_TOKEN` | 访问令牌 | 组织访问令牌(OAT)或有 org 推送权的个人令牌 |
+| `DOCKERHUB_USERNAME` | 令牌所属账号名 | **仅当 token 是个人令牌时需要**(如 `huayeding`);用 OAT 则不配,自动回退到 org 名 `boyuanclub` |
+| `DEPLOY_HOST_A` | `124.221.222.206` | agent 单实例固定在 Node A |
+| `DEPLOY_USER` | `official-boyuan-club` | 需在 docker 组、且拥有 `/opt/boyuan-agent`(含读 600 的 .env.prod) |
+| `DEPLOY_SSH_KEY` | 部署私钥 | 与后端同一把 |
+
+登录身份必须与 token 所属账号一致——个人令牌配 `username: boyuanclub` 会认证失败。
+
 ## 本地测试账号与种子数据
 
 - 统一调试账号:`10245101666@stu.ecnu.edu.cn` / `12345678`(超级管理员;3000/3001 通用)。种子候选人(9002-9006)密码同为 `12345678`。
