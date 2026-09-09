@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 from dataclasses import dataclass
@@ -103,6 +104,25 @@ class EvaluationRunner:
         return job_ids
 
     async def _run_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
+        try:
+            await self._run_job_inner(job_id, cycle_id, trigger_user_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 任何未捕获异常都落 failed,不悬置
+            logging.getLogger(__name__).exception(
+                "job %s 未捕获异常,标记 failed", job_id
+            )
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    evaluation.mark_job,
+                    job_id,
+                    "failed",
+                    error=f"{type(exc).__name__}: {exc}"[:500],
+                )
+
+    async def _run_job_inner(
+        self, job_id: int, cycle_id: int, trigger_user_id: int
+    ) -> None:
         job = await asyncio.to_thread(evaluation.get_job, job_id)
         if job is None:
             return

@@ -25,8 +25,18 @@ def _conn() -> psycopg.Connection[dict[str, Any]]:
     return psycopg.connect(get_settings().postgres_url, row_factory=dict_row)
 
 
+_ensured_scorecard = False
+
+
 def ensure_evaluation_tables(conn: psycopg.Connection[dict[str, Any]]) -> None:
-    """幂等建 evaluation_scorecard(L-1:新环境自举; lifespan 调用,B2 接线)。"""
+    """幂等建 evaluation_scorecard(L-1:新环境自举; lifespan 调用,B2 接线)。
+
+    进程级一次性:B 批量跑时 4 个 job 并发 to_thread,各自执行 DDL 会
+    死锁(B8 批量实测);自举成功后本进程内跳过。
+    """
+    global _ensured_scorecard
+    if _ensured_scorecard:
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS evaluation_scorecard (
@@ -49,6 +59,7 @@ def ensure_evaluation_tables(conn: psycopg.Connection[dict[str, Any]]) -> None:
         "CREATE INDEX IF NOT EXISTS idx_eval_scorecard_resume "
         "ON evaluation_scorecard (resume_id, cycle_id)"
     )
+    _ensured_scorecard = True
 
 
 def save_scorecard(
@@ -148,8 +159,21 @@ def set_scorecard_status(resume_id: int, cycle_id: int, version: int, status: st
 
 # ── B2 执行组织(#126):job 状态表 + 进程内 runner 的持久态 ────────────────
 
+_ensured_job = False
+
+
 def ensure_evaluation_job_table(conn: psycopg.Connection[dict[str, Any]]) -> None:
-    """幂等建 evaluation_job;与 scorecard 同库同自举纪律。"""
+    """幂等建 evaluation_job;与 scorecard 同库同自举纪律(进程级一次)。"""
+    global _ensured_job
+    if _ensured_job:
+        return
+    _ensure_evaluation_job_table_locked(conn)
+    _ensured_job = True
+
+
+def _ensure_evaluation_job_table_locked(
+    conn: psycopg.Connection[dict[str, Any]],
+) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS evaluation_job (

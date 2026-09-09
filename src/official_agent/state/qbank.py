@@ -21,7 +21,19 @@ def _conn() -> psycopg.Connection[dict[str, Any]]:
     return psycopg.connect(get_settings().postgres_url, row_factory=dict_row)
 
 
+_ensured = False
+
+
 def ensure_qbank_tables(conn: psycopg.Connection[dict[str, Any]]) -> None:
+    """进程级一次性自举(并发 DDL 会死锁,同 evaluation.py)。"""
+    global _ensured
+    if _ensured:
+        return
+    _ensure_qbank_tables_locked(conn)
+    _ensured = True
+
+
+def _ensure_qbank_tables_locked(conn: psycopg.Connection[dict[str, Any]]) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS interview_qbank (
