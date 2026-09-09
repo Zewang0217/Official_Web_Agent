@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 
+    # GitHub 调查(D17/#149):调查工具层令牌,可选——匿名 60 次/时限流,
+    # code search 等端点无 token 直接 401。不进 HOT_KEYS(凭证只留 .env)
+    github_token: str = ""
+
     # FastAPI 服务(INF-04):官网候选人客服通道
     agent_host: str = "127.0.0.1"
     agent_port: int = 8001

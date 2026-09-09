@@ -94,6 +94,13 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
         seen.setdefault("marks", []).append(status)
         return True
 
+    async def _fetch_github(user_id):
+        return "someuser"
+
+    async def _bundle(fields, **kw):
+        seen["bundle_kwargs"] = kw
+        return {"groups": [], "prompt_version": "t"}
+
     runner = EvaluationRunner()
     with (
         patch.object(ev_runner, "fetch_scoring_fields", _fetch),
@@ -107,11 +114,16 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
         ),
         patch.object(ev_runner.audit, "write_audit", lambda **k: None),
         patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
+        patch.object(ev_runner, "fetch_candidate_github", _fetch_github),
+        patch("official_agent.evaluation.bundle.run_bundle", _bundle),
     ):
         await runner._run_job(1, 2026, trigger_user_id=9)
     assert seen["marks"] == ["running", "succeeded"]
     assert seen["resume_id"] == 99  # 以取回的 resumeId 为准(job 存的是取数键)
     assert seen["saved"] == (99, 66.0)
+    # D17/#149 接线:github_key 从档案取、GITHUB_TOKEN 从 settings 传参进 bundle
+    assert seen["bundle_kwargs"]["github_key"] == "someuser"
+    assert "github_token" in seen["bundle_kwargs"]
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,8 @@ import logging
 import secrets
 from dataclasses import dataclass
 
+from official_agent.config import get_effective_settings
+from official_agent.evaluation.github_client import normalize_github_login
 from official_agent.evaluation.graph import _prompt_version, run_evaluation
 from official_agent.evaluation.scoring import FieldText
 from official_agent.state import audit, evaluation
@@ -27,6 +29,24 @@ _MAX_CONCURRENCY = 4
 class TriggerItem:
     resume_id: int
     user_id: int
+
+
+async def fetch_candidate_github(user_id: int) -> str:
+    """从候选档案取 github 登录名(D17/#149):GET /api/admin/profiles/{userId}
+    → detail.github(地址或裸登录名)→ 归一化为登录名。
+
+    评测提交认领(submissions)是第二来源,档案为空时暂不回退(诚实边界,
+    见 #149 验收记录)。任何失败返回空串——github_key 缺失只关评测线,
+    不拖垮评分与仓线。"""
+    try:
+        client = await get_backend_client()
+        data = await client.get(f"/api/admin/profiles/{user_id}")
+        return normalize_github_login(str((data or {}).get("github") or ""))
+    except Exception:  # noqa: BLE001 — 档案不可读不挡 job,但留可诊断痕迹
+        logging.getLogger(__name__).warning(
+            "候选档案 github 取数失败(user=%s),评测线跳过", user_id, exc_info=True
+        )
+        return ""
 
 
 async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[FieldText]]:
@@ -132,12 +152,18 @@ class EvaluationRunner:
                     prompt_version=_prompt_version(),
                 )
                 # 调查 bundle → qbank(与评分同任务完成;失败不拖垮评分结果)
+                # D17/#149:GITHUB_TOKEN 从 settings 传参;github_key 从候选
+                # 档案取,接通评测线(错因追问)
                 try:
                     from official_agent.evaluation import bundle as eval_bundle
                     from official_agent.state import qbank as qbank_store
 
                     envelope = await eval_bundle.run_bundle(
-                        fields, resume_id=resume_id, cycle_id=cycle_id
+                        fields,
+                        resume_id=resume_id,
+                        cycle_id=cycle_id,
+                        github_key=await fetch_candidate_github(job["user_id"]) or None,
+                        github_token=get_effective_settings().github_token,
                     )
                     await asyncio.to_thread(
                         qbank_store.save_qbank,
