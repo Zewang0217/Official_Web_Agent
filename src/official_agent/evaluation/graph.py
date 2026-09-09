@@ -172,29 +172,50 @@ async def llm_score(state: EvaluationState) -> dict:
             + "\nfield_key 取值必须是:"
             + ",".join(f["field_key"] for f in state["fields"])
         )
-        resp = await model.ainvoke([HumanMessage(content=prompt_text)])
-        raw = resp.content
-        if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
-            raw = "".join(
-                b.get("text", "") for b in raw if isinstance(b, dict)
-            )
-        content = raw if isinstance(raw, str) else str(raw)
-        result = ScorecardOutput.model_validate_json(_extract_json(content))
-        # strict 后置校验(评审 P1):模型漏维/造维、证据非原文都属静默降级,
-        # 在这里翻进 error 态走 B2 重试,绝不落成"看起来完整"的卡
+        # 结构化输出 + strict 后置校验(评审 P1):漏维/造维/证据非原文
+        # 都不许落卡。模型偶发拼接引述 → 子图内一次纠正重试(带上次原因);
+        # 两次仍不合规才翻 error 态走 B2 重试
         expected = [f["field_key"] for f in state["fields"]]
-        got = [d.field_key for d in result.dimensions]
-        if sorted(got) != sorted(expected):
-            raise ValueError(
-                f"维度集不完整:缺 {sorted(set(expected) - set(got))},"
-                f"多 {sorted(set(got) - set(expected))}"
-            )
         sources = {f["field_key"]: f.get("value", "") for f in state["fields"]}
-        for d in result.dimensions:
-            if not _evidence_in(d.evidence, sources.get(d.field_key, "")):
-                raise ValueError(
-                    f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}"
+        result: ScorecardOutput | None = None
+        last_err: ValueError | None = None
+        corrective = ""
+        for _attempt in range(2):
+            resp = await model.ainvoke(
+                [HumanMessage(content=prompt_text + corrective)]
+            )
+            raw = resp.content
+            if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
+                raw = "".join(
+                    b.get("text", "") for b in raw if isinstance(b, dict)
                 )
+            content = raw if isinstance(raw, str) else str(raw)
+            try:
+                result = ScorecardOutput.model_validate_json(_extract_json(content))
+                got = [d.field_key for d in result.dimensions]
+                if sorted(got) != sorted(expected):
+                    raise ValueError(
+                        f"维度集不完整:缺 {sorted(set(expected) - set(got))},"
+                        f"多 {sorted(set(got) - set(expected))}"
+                    )
+                for d in result.dimensions:
+                    if not _evidence_in(d.evidence, sources.get(d.field_key, "")):
+                        raise ValueError(
+                            f"证据非原文(field_key={d.field_key}):"
+                            f"{d.evidence!r} vs 原文:{sources.get(d.field_key, '')[:60]!r}"
+                        )
+                last_err = None
+                break
+            except ValueError as ve:
+                last_err = ve
+                result = None
+                corrective = (
+                    f"\n\n【纠正】你上一次的输出不合规:{ve}"
+                    "\n请重新输出:evidence 必须逐字复抄该维原文片段"
+                    "(可截取但不可改写),dimensions 必须覆盖全部分维度。"
+                )
+        if result is None or last_err is not None:
+            raise ValueError(f"两次输出均不合规:{last_err}")
         scores = {d.field_key: d.score for d in result.dimensions}
         card_total_zero = bool(scores) and all(s == 0 for s in scores.values())
         card = {
