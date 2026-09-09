@@ -248,7 +248,7 @@ async def test_route_node_trusted_url_routes_deep_dive() -> None:
         "candidate_login": "me",
     }
     result = await ig.route_node(state)
-    assert result["route"] in {"deep_dive", "guided"}  # substantive 文本→deep_dive
+    assert result["route"] == "deep_dive"  # substantive 文本 + trusted → 深挖
     assert result["attribution"]["level"] == "trusted-own"
     assert result["repo_owner"] == "me"
 
@@ -260,5 +260,45 @@ def test_keyword_candidates_extracts_latin_and_quoted() -> None:
     kws = keyword_candidates("项目《云笔记》,基于 SpringBoot 开发,见 https://github.com/x/y")
     assert "SpringBoot" in kws
     assert "云笔记" in kws
-    assert "github" not in [k.lower() for k in kws if k.lower() == "github"] or True
-    assert all(k not in ("http", "com") for k in kws)
+    lowered = {k.lower() for k in kws}
+    assert not lowered & {"github", "http", "https", "com", "www", "org"}
+
+
+# ── 评审 P1 回归:词界等值匹配,防绑定名下无关仓被误判点名 ──
+
+
+def test_repo_matching_requires_word_boundary() -> None:
+    """关键词 'blog' 不得子串命中 'myblogengine'(D2:只深挖点名项目)。"""
+    from official_agent.evaluation.attribution import _repo_matches
+
+    row = {"name": "myblogengine", "description": "a blog engine"}
+    assert _repo_matches(row, ["blog"]) is False
+    assert _repo_matches(row, ["myblogengine"]) is True  # 全名等值
+    assert _repo_matches({"name": "shop-mall"}, ["shop"]) is True  # 词元等值
+    assert _repo_matches({"name": "shop-mall"}, ["shopmall"]) is True  # 去分隔符等值
+    # 描述不再参与匹配(太松)
+    assert _repo_matches({"name": "unrelated", "description": "blog platform"}, ["blog"]) is False
+
+
+def test_contribution_regex_ignores_tech_stack_slash() -> None:
+    assert detect_contribution_target("为 Vue/React 双栈开发") is None
+    assert detect_contribution_target("给 kubernetes/kubernetes 贡献了调度器") == (
+        "kubernetes",
+        "kubernetes",
+    )
+
+
+@respx.mock
+async def test_route_node_contribution_claim_bound_no_evidence_guides() -> None:
+    """贡献声明 + 绑定但查无 commits/PR → claimed,不深挖只 guided(D4)。"""
+    respx.get(f"{base}/repos/org/toolkit/commits").mock(_json([]))
+    respx.get(f"{base}/search/issues").mock(_json({"items": []}))
+    state = {
+        "project_text": "给 org/toolkit 贡献了插件模块",
+        "github_base": base,
+        "candidate_login": "me",
+    }
+    result = await ig.route_node(state)
+    assert result["route"] == "guided"
+    assert result["attribution"]["level"] == "claimed"
+    assert result["attribution"]["source"] == "contribution"

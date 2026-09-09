@@ -83,17 +83,10 @@ async def route_node(state: InvestigationState) -> dict:
         token=state.get("github_token") or "",
     )
     found: RepoAttribution | None = None
-    if repo is None and login:
-        # 瀑布第 2/3 步:绑定名下匹配 / 搜索兜底(第 1 步已被 extract_repo 覆盖)
-        try:
-            found = await resolve_entry(text, login=login, client=client)
-        except GitHubUnavailable:
-            found = None
-        if found:
-            repo = (found.owner, found.name)
     if repo is None:
-        # 贡献声明是一等调查对象(D4):绑定并查到 commits/PR → 深挖;
-        # 未绑定/无证据 → claimed,不深挖只出过程题
+        # 贡献声明优先于绑定匹配/搜索(D4):「仓+贡献动词」是明确点名,
+        # 绑定并查到 commits/PR → trusted-contribution 深挖;未绑定/无证据
+        # → claimed,不深挖只出过程题
         target = detect_contribution_target(text)
         if target:
             found = await attribute(
@@ -114,17 +107,34 @@ async def route_node(state: InvestigationState) -> dict:
                         "source": found.source,
                     },
                 }
+    if repo is None and login:
+        # 瀑布第 2/3 步:绑定名下匹配 / 搜索兜底(第 1 步已被 extract_repo 覆盖)
+        try:
+            found = await resolve_entry(text, login=login, client=client)
+        except GitHubUnavailable:
+            found = None
+        if found:
+            repo = (found.owner, found.name)
     if repo is None:
         return {"route": route_project(text, None)}
     try:
         meta = await client.repo(*repo)
         branch = meta.get("default_branch") or "main"
     except GitHubUnavailable:
-        return {
+        degraded: dict = {
             "route": route_project(text, False),
             "repo_owner": repo[0],
             "repo_name": repo[1],
         }
+        if found is not None:
+            degraded["attribution"] = {
+                "owner": found.owner,
+                "name": found.name,
+                "level": found.level,
+                "evidence": found.evidence,
+                "source": found.source,
+            }
+        return degraded
     if found is None:
         # 钉住/URL 直配的仓:简历自述来源 → source=url(归属内部自查 commits/PR)
         found = await attribute(

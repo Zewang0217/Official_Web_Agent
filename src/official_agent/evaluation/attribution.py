@@ -28,12 +28,15 @@ from official_agent.evaluation.investigate import extract_repos
 
 AttributionLevel = Literal["trusted-own", "trusted-contribution", "claimed", "unverified"]
 
-# 贡献声明:给 xx/yy(仓)贡献 / 向 xx/yy 提了 PR / contribute to owner/repo
+# 贡献声明:owner/repo 紧跟贡献动词(贡献/提了/提交),或英文 contribute to。
+# 只认「仓 + 贡献动词」连用,避免吃下「为 Vue/React 双栈」这类技术栈斜杠。
 _CONTRIB_RE = re.compile(
-    r"(?:给|向|为)\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:contribute[ds]?\s+to\s+"
-    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))",
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*(?:贡献|提了?|提交过?)"
+    r"|contribute[ds]?\s+to\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
     re.IGNORECASE,
 )
+#: 搜索兜底最多打的关键词数(防次级限流与误命中放大;其余关键词弃用)
+_MAX_SEARCH_KEYWORDS = 3
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,10 @@ class RepoAttribution:
 
 
 def detect_contribution_target(text: str) -> tuple[str, str] | None:
-    """从贡献声明里提取目标仓(owner/repo);「给 xx 仓做贡献」是一等调查对象(D4)。"""
+    """从贡献声明里提取目标仓(owner/repo);「给 xx 仓做贡献」是一等调查对象(D4)。
+
+    只认「仓 + 贡献动词」连用(给 kubernetes/kubernetes 贡献了 / 提了 PR 到
+    xx/yy / contribute to xx/yy);「为 Vue/React 双栈」这类技术栈斜杠不算。"""
     match = _CONTRIB_RE.search(text or "")
     if not match:
         return None
@@ -71,21 +77,40 @@ def detect_contribution_target(text: str) -> tuple[str, str] | None:
 def keyword_candidates(text: str) -> list[str]:
     """从项目自述提取搜索/匹配关键词(确定性,不做 LLM 判断)。
 
-    取:书名号/引号包住的词 + 拉丁词元(≥3 字符)。纯 CJK 自述提不出拉丁
-    关键词时返回空——瀑布第 2/3 步静默跳过,走 guided,不硬猜。"""
+    取:书名号/引号包住的词 + 拉丁词元(≥3 字符,滤通用停用词)。纯 CJK
+    自述提不出拉丁关键词时返回空——瀑布第 2/3 步静默跳过,走 guided,
+    不硬猜。"""
     kws: list[str] = []
     for quoted in re.findall(r"[《「【\"']([^》」】\"']{2,40})[》」】\"']", text or ""):
         kws.append(quoted.strip())
     for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text or ""):
-        if token.lower() not in {"github", "http", "https", "com", "www"}:
+        if token.lower() not in _STOPWORDS:
             kws.append(token)
     return kws
 
 
+_STOPWORDS = frozenset(
+    {"github", "http", "https", "com", "www", "git", "org", "io", "net", "cn"}
+)
+
+
+def _norm(name: str) -> str:
+    """仓名/关键词归一:小写并去掉分隔符(shop-mall 与 shopmall 等价)。"""
+    return re.sub(r"[-_.]+", "", name.lower())
+
+
 def _repo_matches(row: dict, keywords: list[str]) -> bool:
-    """仓名/描述命中任一关键词(大小写不敏感)。"""
-    hay = f"{row.get('name', '')} {row.get('description', '')}".lower()
-    return any(kw.lower() in hay for kw in keywords)
+    """仓名命中任一关键词——**词界等值**,不做子串(D2 只深挖点名项目)。
+
+    匹配 = 关键词等于仓名 / 等于仓名按 [-_.] 切出的词元 / 去分隔符后等值。
+    描述不参与(描述子串太松,会把绑定名下无关仓误判成点名项目)。"""
+    name = (row.get("name") or "").lower()
+    tokens = {t for t in re.split(r"[-_.]+", name) if t}
+    for kw in keywords:
+        k = kw.lower()
+        if k == name or k in tokens or _norm(k) == _norm(name):
+            return True
+    return False
 
 
 async def _contribution_evidence(
@@ -169,8 +194,9 @@ async def resolve_entry(
                     row["owner_login"], row["name"], login=login, source="bound", client=client
                 )
 
-    # 3. GitHub Search 按项目名搜(撞名 → unverified,不深挖)
-    for kw in keywords:
+    # 3. GitHub Search 按项目名搜(撞名 → unverified,不深挖)。
+    #    只打前 _MAX_SEARCH_KEYWORDS 个关键词,防次级限流与误命中放大。
+    for kw in keywords[:_MAX_SEARCH_KEYWORDS]:
         hits = await client.search_repos(kw)
         for row in hits:
             if _repo_matches(row, keywords):
