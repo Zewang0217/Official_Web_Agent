@@ -14,6 +14,12 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 
 from official_agent.config import get_effective_settings
+from official_agent.evaluation.attribution import (
+    RepoAttribution,
+    attribute,
+    detect_contribution_target,
+    resolve_entry,
+)
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import (
@@ -39,11 +45,13 @@ class InvestigationState(TypedDict, total=False):
     project_text: str
     github_base: str
     github_token: str
+    candidate_login: str
     route: str
     repo_owner: str
     repo_name: str
     default_branch: str
     repo_brief: str
+    attribution: dict
     paths: list[str]
     paths_truncated: bool
     worthiness: str
@@ -52,12 +60,14 @@ class InvestigationState(TypedDict, total=False):
 
 
 async def route_node(state: InvestigationState) -> dict:
-    """提取仓位置并探测可读性 → 路由(#130)。
+    """提取仓位置并探测可读性 → 路由(#130);入口瀑布+归属四级(#150)。
 
     支持 M-1 多仓:调用方可预置 repo_owner/repo_name 钉住某仓(逐仓深挖);
-    未钉时回退首个匹配(extract_repo)。
+    未钉时走瀑布:简历 URL 直配 → 绑定登录名匹配 → GitHub 搜索兜底。
+    unverified(搜索撞名)不深挖只 guided(ADR-0008)。
     """
     text = state["project_text"]
+    login = state.get("candidate_login", "")
     pinned_owner = state.get("repo_owner")
     pinned_name = state.get("repo_name")
     repo = (
@@ -65,12 +75,47 @@ async def route_node(state: InvestigationState) -> dict:
         if pinned_owner and pinned_name
         else extract_repo(text)
     )
-    if repo is None:
+    if repo is None and not login and detect_contribution_target(text) is None:
+        # 无仓位置且无登录名/贡献声明:不建 client(零 GitHub 调用,skip 断言依赖此)
         return {"route": route_project(text, None)}
     client = GitHubClient(
         base_url=state.get("github_base") or "https://api.github.com",
         token=state.get("github_token") or "",
     )
+    found: RepoAttribution | None = None
+    if repo is None and login:
+        # 瀑布第 2/3 步:绑定名下匹配 / 搜索兜底(第 1 步已被 extract_repo 覆盖)
+        try:
+            found = await resolve_entry(text, login=login, client=client)
+        except GitHubUnavailable:
+            found = None
+        if found:
+            repo = (found.owner, found.name)
+    if repo is None:
+        # 贡献声明是一等调查对象(D4):绑定并查到 commits/PR → 深挖;
+        # 未绑定/无证据 → claimed,不深挖只出过程题
+        target = detect_contribution_target(text)
+        if target:
+            found = await attribute(
+                *target, login=login, source="contribution", client=client
+            )
+            if found.deep_dive_allowed:
+                repo = target
+            else:
+                return {
+                    "route": "guided",
+                    "repo_owner": target[0],
+                    "repo_name": target[1],
+                    "attribution": {
+                        "owner": found.owner,
+                        "name": found.name,
+                        "level": found.level,
+                        "evidence": found.evidence,
+                        "source": found.source,
+                    },
+                }
+    if repo is None:
+        return {"route": route_project(text, None)}
     try:
         meta = await client.repo(*repo)
         branch = meta.get("default_branch") or "main"
@@ -80,11 +125,28 @@ async def route_node(state: InvestigationState) -> dict:
             "repo_owner": repo[0],
             "repo_name": repo[1],
         }
+    if found is None:
+        # 钉住/URL 直配的仓:简历自述来源 → source=url(归属内部自查 commits/PR)
+        found = await attribute(
+            repo[0], repo[1], login=login, source="url", client=client
+        )
+    readable = True
+    route = route_project(text, readable)
+    if not found.deep_dive_allowed:
+        # unverified:仓存在也不深挖,仅 guided(ADR-0008)
+        route = "guided"
     return {
-        "route": route_project(text, True),
+        "route": route,
         "repo_owner": repo[0],
         "repo_name": repo[1],
         "default_branch": str(branch),
+        "attribution": {
+            "owner": found.owner,
+            "name": found.name,
+            "level": found.level,
+            "evidence": found.evidence,
+            "source": found.source,
+        },
     }
 
 
@@ -249,6 +311,7 @@ async def run_investigation(
     repo: tuple[str, str] | None = None,
     github_base: str = "https://api.github.com",
     github_token: str = "",
+    candidate_login: str = "",
 ) -> dict:
     """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。
 
@@ -260,6 +323,7 @@ async def run_investigation(
         "project_text": project_text,
         "github_base": github_base,
         "github_token": github_token,
+        "candidate_login": candidate_login,
     }
     if repo:
         init["repo_owner"], init["repo_name"] = repo

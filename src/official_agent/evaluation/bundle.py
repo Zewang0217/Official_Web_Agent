@@ -94,7 +94,10 @@ async def run_bundle(
         pinned = (owner, name) if owner and name else None
         try:
             repo_envelope = await ig.run_investigation(
-                project_text, repo=pinned, github_token=github_token
+                project_text,
+                repo=pinned,
+                github_token=github_token,
+                candidate_login=github_key or "",
             )
             groups.append(
                 {
