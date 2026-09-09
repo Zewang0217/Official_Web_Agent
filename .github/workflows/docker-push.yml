@@ -1,0 +1,167 @@
+name: Push to Docker Hub & Deploy on main
+
+# 触发:推送 main、打 v*.*.* 标签、或手动。纯文档改动不触发。
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'evals/**'
+  workflow_dispatch:
+
+# 生产部署串行化,cancel-in-progress=false —— 与后端 docker-push.yml 同一取舍:
+# 取消一个换到一半容器的部署,比排队危险。
+# (前端 deploy.yml 相反用 true,因为它只是 rsync 整体替换目录,无半成品状态。)
+concurrency:
+  group: deploy-agent-production
+  cancel-in-progress: false
+
+env:
+  DOCKER_USERNAME: boyuanclub
+  IMAGE_NAME: official-agent
+  # agent 单实例固定在 Node A(进程内会话表 _sessions 是单机语义,#116;
+  # 会话层外置后才能多副本)。故不做 B→A 滚动,只部署 A。
+  DEPLOY_DIR: /opt/boyuan-agent
+
+jobs:
+  # ── 1) 测试门禁:不过不发布 ────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-groups
+      - run: uv run ruff check .
+      - run: uv run pytest
+
+  # ── 2) 构建并推送镜像 ────────────────────────────────────
+  # 为什么必须在 CI 构建而不是服务器上构建(2026-09-09 首次上线实测):
+  #   · Node A 拉不到 ghcr.io —— builder 基础镜像 ghcr.io/astral-sh/uv 卡在
+  #     11MB/22MB 停 1394 秒;腾讯云镜像加速只代理 Docker Hub,不含 ghcr.io
+  #   · Node A 的 pypi.org 也超时(镜像源通,但过不了基础镜像那关)
+  #   · 开发机反过来:能到 ghcr.io,但 auth.docker.io connection reset
+  #   GitHub Actions 两边网络都通 —— 这条流水线正是为消掉这个死结而存在。
+  build:
+    name: Build & Push image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 版本号:tag 触发用 tag 本身,push 触发在 Docker Hub 现有最大 SemVer 上 +1
+      - name: Bump Version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == 'tag' ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          else
+            RESPONSE=$(curl -s "https://hub.docker.com/v2/repositories/${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}/tags?page_size=100")
+            LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.results[]?.name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            if [[ -z "$LATEST_VERSION" ]] || [[ "$LATEST_VERSION" == "null" ]]; then
+              LATEST_VERSION="0.0.0"
+            fi
+            IFS='.' read -ra P <<< "$LATEST_VERSION"
+            echo "version=${P[0]}.${P[1]}.$(( ${P[2]} + 1 ))" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          # 服务器是 x86_64;开发机 arm64 只在本地构建时才需要 --platform
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          # GHA 层缓存:依赖未变时 uv sync 那层摘要不变,服务器 pull 只下应用层
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+  # ── 3) 部署到 Node A(拉镜像 → 换容器 → 健康检查 → 失败回滚)──
+  deploy:
+    name: Deploy to Node A
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+    steps:
+      - name: Pull, restart and verify
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST_A }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            cd ${{ env.DEPLOY_DIR }}/deploy
+
+            # .env.prod 是服务器独有的密钥文件(SEC-01,不入库);缺了就中止,
+            # 免得 compose 用空变量把容器起成不可用状态
+            test -f .env.prod || { echo ".env.prod 不存在,先按 deploy/README.md 配置" >&2; exit 1; }
+
+            # --env-file 必带:compose 的 ${} 插值只默认读 .env,不读 .env.prod
+            # (env_file: 只注入容器,不参与插值 —— 两套机制,见 PR #138)
+            DC="docker compose --env-file .env.prod -f docker-compose.prod.yml"
+
+            # 记下当前镜像摘要,失败时回滚到它
+            PREV=$($DC images -q agent 2>/dev/null | head -1 || true)
+            echo "回滚锚点:${PREV:-无(首次部署)}"
+
+            n=0
+            until timeout 600 $DC pull agent; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "拉取镜像重试 3 次仍失败" >&2; exit 1; fi
+              echo "拉取失败/超时,第 $n 次重试..."; sleep 10
+            done
+
+            $DC up -d --no-build agent
+
+            echo "等待 /health 就绪..."
+            ok=0
+            for i in $(seq 1 20); do
+              if curl -fsS -m 5 http://127.0.0.1:8001/health | grep -q '"status":"ok"'; then
+                ok=1; echo "健康检查通过(第 $i 次)"; break
+              fi
+              sleep 5
+            done
+
+            if [ "$ok" != "1" ]; then
+              echo "健康检查超时,最后 40 行日志:" >&2
+              $DC logs --tail=40 agent >&2 || true
+              if [ -n "$PREV" ]; then
+                echo "回滚到上一镜像 $PREV" >&2
+                docker tag "$PREV" ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+                $DC up -d --no-build agent
+                for i in $(seq 1 12); do
+                  curl -fsS -m 5 http://127.0.0.1:8001/health | grep -q '"status":"ok"' && { echo "回滚后已恢复"; break; }
+                  sleep 5
+                done
+              fi
+              exit 1
+            fi
+
+            # /health 只看 checkpointer(PG)可达;再确认业务路由真的在服务
+            # (无 token 应为 401 —— 200/404 都说明路由或鉴权不对)
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 http://127.0.0.1:8001/api/agent/sessions)
+            test "$code" = "401" || { echo "业务路由异常:/api/agent/sessions 返回 $code(预期 401)" >&2; exit 1; }
+            echo "部署完成:${{ needs.build.outputs.version }}"
+
+            docker image prune -f --filter "until=168h" >/dev/null 2>&1 || true

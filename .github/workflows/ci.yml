@@ -1,9 +1,9 @@
 name: CI
 
+# main 的门禁由 docker-push.yml 的 test job 承担,这里只管 PR,
+# 避免同一提交在两条流水线上重复跑测试。
 on:
   pull_request:
-  push:
-    branches: [main]
 
 jobs:
   test:
@@ -16,4 +16,5 @@ jobs:
       - run: uv sync --all-groups
       - run: uv run ruff check .
       - run: uv run pytest
-      # TODO(OBS-07): eval 门禁 —— 确定性断言层进 CI,分数低于基线阻断合入
+      # TODO(OBS-07/#70): eval 门禁 —— 确定性断言层进 CI,低于基线阻断合入。
+      # 阻塞点:fork PR 拿不到 secrets(无模型 key)、标注集不入库,方案见 #70。
