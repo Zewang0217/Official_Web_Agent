@@ -68,7 +68,15 @@ def save_qbank(
     envelope: dict[str, Any],
     prompt_version: str,
 ) -> int:
-    """落题集:版本递增旧版保留(与 scorecard 同语义);返回 qbank_version。"""
+    """落题集:版本递增旧版保留(与 scorecard 同语义);返回 qbank_version。
+
+    #153:只收 evaluation_qbank/v2 信封(D13 直接替换,不兼容旧形状)——
+    旧结构数据在本地开发库直接清(TRUNCATE interview_qbank),不迁移。"""
+    if envelope.get("schema_name") != "evaluation_qbank/v2":
+        raise ValueError(
+            "envelope 非 evaluation_qbank/v2(#153 直接替换):"
+            "本地开发库请清空 interview_qbank 旧结构数据后重跑"
+        )
     # MAX+1 并发窗口:撞唯一键重读重试(同 evaluation.save_scorecard 先例)
     for attempt in range(2):
         try:
@@ -167,3 +175,79 @@ def list_picks(resume_id: int, cycle_id: int) -> list[dict[str, Any]]:
             item["question_ref"] = json.loads(item["question_ref"])
         result.append(item)
     return result
+
+
+def flatten_v2_pickable(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    """v2 信封 → 可挑题扁平视图(#153):UI 挑题不用懂组内嵌套。
+
+    每题带定位引用 question_ref(group_kind/role/category/chain_index/
+    layer_index/question),record_pick 原样落 qbank_pick_log。"""
+    out: list[dict[str, Any]] = []
+
+    def _ref(**kw: Any) -> dict[str, Any]:
+        return kw
+
+    for gi, g in enumerate(envelope.get("groups", [])):
+        kind = str(g.get("group", ""))
+        # repo v2 组:entry/chains/reserves 直接在组顶层(kind 是字符串);
+        # 其余组(kind 字符串 + questions 列表)走旧扁平形状
+        inner = (
+            g
+            if ("entry" in g or "chains" in g or "reserves" in g)
+            else (g.get("group") if isinstance(g.get("group"), dict) else None)
+        )
+        if inner is not None:
+            entry = inner.get("entry")
+            if entry:
+                out.append(
+                    _ref(
+                        group_index=gi,
+                        group_kind=kind,
+                        role="entry",
+                        category=entry.get("category", ""),
+                        question=entry.get("question", ""),
+                        evidence_path=(entry.get("evidence") or {}).get("path", ""),
+                        time_minutes=entry.get("time_minutes", 3),
+                    )
+                )
+            for ci, chain in enumerate(inner.get("chains", [])):
+                for li, layer in enumerate(chain.get("layers", [])):
+                    out.append(
+                        _ref(
+                            group_index=gi,
+                            group_kind=kind,
+                            role="chain",
+                            category=chain.get("category", ""),
+                            chain_index=ci,
+                            layer_index=li,
+                            question=layer.get("question", ""),
+                            expected_signal=layer.get("expected_signal", ""),
+                            theme=chain.get("theme", ""),
+                        )
+                    )
+            for ri, r in enumerate(inner.get("reserves", [])):
+                out.append(
+                    _ref(
+                        group_index=gi,
+                        group_kind=kind,
+                        role="reserve",
+                        category=r.get("category", ""),
+                        reserve_index=ri,
+                        question=r.get("question", ""),
+                        evidence_path=(r.get("evidence") or {}).get("path", ""),
+                        time_minutes=r.get("time_minutes", 3),
+                    )
+                )
+            continue
+        for qi, q in enumerate(g.get("questions", [])):
+            out.append(
+                _ref(
+                    group_index=gi,
+                    group_kind=kind,
+                    role="question",
+                    category=q.get("anchor", ""),
+                    question_index=qi,
+                    question=q.get("question", ""),
+                )
+            )
+    return out

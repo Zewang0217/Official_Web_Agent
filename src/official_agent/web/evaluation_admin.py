@@ -131,6 +131,10 @@ async def get_qbank(
         raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc
     if row is None:
         raise HTTPException(status_code=404, detail="该候选暂无预置题库")
+    envelope = row.get("envelope") or {}
+    row = dict(row)
+    # #153:v2 题组的可挑题扁平视图(UI 挑题不感知组内嵌套)
+    row["pickable"] = qbank_store.flatten_v2_pickable(envelope)
     return row
 
 
