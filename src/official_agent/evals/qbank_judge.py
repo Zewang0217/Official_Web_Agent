@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,15 @@ async def run_suite(path: Path, *, distribution: bool = False, **_: Any) -> Suit
         for d in report["dimensions"]
     ]
     metrics = {f"judge_{d['dimension']}": float(d["score"]) for d in report["dimensions"]}
+
+    # 报告落盘(#155 契约):AG8 校准与人工抽查的数据源;fail-open
+    report_path = path.parent.parent / "last_qbank_judge_report.json"
+    with contextlib.suppress(OSError):
+        report_path.write_text(
+            json.dumps({"suite": str(path), "report": report}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     return SuiteResult(
         name=path.stem,
         kind="qbank_judge",

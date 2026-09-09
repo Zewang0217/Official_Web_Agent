@@ -16,7 +16,11 @@ fixtures:
     ### C3_架构与数据流
     路径清单:README.md src/app.py src/models.py tests/test_app.py
     ### C4_实现细节拷打
-    src/app.py 中报名接口带限流与参数校验,缓存报名计数。
+    src/app.py 中报名接口带限流与参数校验,缓存报名计数,并对重复提交做了幂等处理。
+    src/models.py 定义了报名、场次与候选人三类模型,报名与场次是一对多关系。
+    tests/test_app.py 覆盖了报名成功、重复报名、字段缺失三类场景,跑通 CI。
+    部署采用 docker compose,数据库迁移用 alembic 管理,配置面留了环境变量注入点。
+    报名高峰(开放首日)出现过短时排队,后续把写入改成队列异步落库。
   paths: ["README.md", "src/app.py", "src/models.py", "tests/test_app.py"]
 
 cases:
@@ -69,7 +73,7 @@ cases:
             - { question: "太浅了。", expected_signal: "s" }
       reserves: *reserves
 
-  # ③ 题量硬顶 15(4 链 × 5 层 + 入口 + 3 备选 = 24)
+  # ③ 题量硬顶 15(入口 + 4 链 × 5 层 + 2 备选 = 23)
   - id: probe-total-cap-rejected
     validate: reject
     match: "题量超硬顶"
@@ -165,3 +169,75 @@ cases:
             - { question: "L2?", expected_signal: "s" }
             - { question: "L3?", expected_signal: "s" }
       reserves: *reserves
+
+  # ①' 十类覆盖(spec §4 十类枚举逐一可达):单组结构上限 7 槽
+  # (入口1+链3+备选3),故两组互补覆盖十类——每组各自通过
+  - id: probe-ten-categories-part1-pass
+    validate: pass
+    group:
+      entry:
+        category: C1_背景与动机
+        question: "为什么做这个系统?"
+        answer_reference: { strong: s, acceptable: a, weak: w }
+        evidence: { path: "README.md", note: "" }
+        time_minutes: 3
+      chains:
+        - category: C2_技术选型与权衡
+          theme: "redis 客户端的选型与权衡"
+          layers:
+            - { question: "为什么 redis 不 memcached?", expected_signal: "s" }
+            - { question: "放弃 django 的原因?", expected_signal: "s" }
+            - { question: "重选一次改什么?", expected_signal: "s" }
+        - category: C3_架构与数据流
+          theme: "src/models.py 到报名接口的数据流"
+          layers:
+            - { question: "数据从报名到落库怎么流?", expected_signal: "s" }
+            - { question: "哪层最脆弱?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的限流实现"
+          layers:
+            - { question: "限流算法?", expected_signal: "s" }
+            - { question: "阈值依据?", expected_signal: "s" }
+            - { question: "分布式怎么改?", expected_signal: "s" }
+      reserves:
+        - category: C5_数字与规模
+          question: "你怎么知道它能扛?"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "README.md", note: "" }
+          time_minutes: 3
+
+  - id: probe-ten-categories-part2-pass
+    validate: pass
+    group:
+      entry:
+        category: C6_难点与调试
+        question: "最难的一次排查经历?"
+        answer_reference: { strong: s, acceptable: a, weak: w }
+        evidence: { path: "README.md", note: "" }
+        time_minutes: 3
+      chains:
+        - category: C7_边界与失败模式
+          theme: "src/models.py 的并发写入边界"
+          layers:
+            - { question: "并发报名怎么处理?", expected_signal: "s" }
+            - { question: "数据库挂了呢?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+        - category: C8_真实性与贡献边界
+          theme: "src/app.py 的模块归属核对"
+          layers:
+            - { question: "哪些是你独立写的?", expected_signal: "s" }
+            - { question: "怎么证明?", expected_signal: "s" }
+            - { question: "分工边界?", expected_signal: "s" }
+        - category: C9_变更条件
+          theme: "README.md 的部署配置面"
+          layers:
+            - { question: "流量 ×10 哪先坏?", expected_signal: "s" }
+            - { question: "配置面怎么扩?", expected_signal: "s" }
+            - { question: "哪个依赖先到顶?", expected_signal: "s" }
+      reserves:
+        - category: C10_复盘与改进
+          question: "重做会改什么?"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "", note: "" }
+          time_minutes: 3
