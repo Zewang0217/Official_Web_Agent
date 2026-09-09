@@ -8,8 +8,9 @@ docstring 契约(ADR-0003):写「何时用」而非「能做什么」,列边界�
   用真实字段键统一裁剪,这里不猜字段名);
 - 聚合工具(get_recruit_statistics)只回计数与下钻提示,不回明细。
 
-PII 红线(#68):本层返回原文即 trace 上报原文。get_resume_detail 是
-最大暴露面(完整简历),评估流水线接入观测前必须先拍板脱敏边界。
+PII 红线(#68):get_resume_detail 返回层已就地脱敏(#115 review P0-3,
+与 conversation_log 共用 security/pii.py 规则表)——trace 上报的是脱敏后
+数据。其余工具与 trace 采集点二次脱敏/留存策略仍归 #68 拍板。
 """
 
 import asyncio
@@ -86,11 +87,17 @@ async def get_resume_detail(user_id: int, cycle_id: int) -> dict:
 
     对应 GET /api/resumes/admin/{userId}/{cycleId}(不存在按 resumeId 直查的端点;
     resumeId 需先经 search_resumes 拿到对应 userId)。
-    ⚠ 返回完整简历内容(含手机号/学号等 PII),输出会被 trace 记录——
-    不要在面向候选人的回答里复述这些字段。
+    PII(#115 review P0-3):返回层就地脱敏(mask_pii_deep,与 conversation_log
+    共用规则表)——完整简历进模型上下文即进 Langfuse trace,工具层脱敏后
+    trace 侧闭环;面向候选人的回答本就不复述隐私字段(assistant.md)。
+    trace 采集点二次脱敏/留存策略仍归 #68 拍板。
     """
     client = await get_backend_client()
-    return await client.get(f"/api/resumes/admin/{user_id}/{cycle_id}")
+    result = await client.get(f"/api/resumes/admin/{user_id}/{cycle_id}")
+
+    from official_agent.security.pii import mask_pii_deep
+
+    return mask_pii_deep(result)
 
 
 async def get_my_interview(cycle_id: int, user_token: str) -> dict | None:
