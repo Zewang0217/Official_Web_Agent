@@ -8,6 +8,7 @@ from official_agent.config import Settings
 from official_agent.tools import readonly
 from official_agent.tools.client import BackendClient, BackendError
 from official_agent.tools.readonly import (
+    asker_scope,
     get_backend_client,
     get_candidate_card,
     get_my_interview,
@@ -268,3 +269,44 @@ async def test_statistics_contract_drift_fails_loudly(mock_client: BackendClient
 
     with pytest.raises(BackendError, match="契约可能已变更"):
         await get_recruit_statistics(cycle_id=1)
+
+
+@respx.mock
+async def test_asker_scope_sends_asker_jwt_not_service_account(
+    mock_client: BackendClient,
+) -> None:
+    """A·SEC-02:web turn(asker_scope 激活)内经 _read 的查询以本人 JWT 裸发,
+    不带服务账号 token(绝不用服务账号代读)。"""
+    search_route = respx.get(f"{BASE}/api/resumes/search").mock(
+        return_value=ok({"content": [], "totalElements": 0})
+    )
+    # 注意:不在 asker 作用域内,singleton 无需登录(走 get_as_user,不经 _ensure_token)
+    async with asker_scope("asker-jwt-abc"):
+        await search_resumes(cycle_id=2)
+    req = search_route.calls.last.request
+    assert req.headers["Authorization"] == "Bearer asker-jwt-abc"
+
+
+@respx.mock
+async def test_asker_scope_does_not_leak_across_turns(mock_client: BackendClient) -> None:
+    """作用域在 turn 结束后必须复位:下一个 turn 的查询不再携带上一个身份的 JWT。"""
+    respx.post(LOGIN).side_effect = login_ok()
+    route = respx.get(f"{BASE}/api/resumes/search").mock(
+        return_value=ok({"content": [], "totalElements": 0})
+    )
+    async with asker_scope("token-a"):
+        await search_resumes(cycle_id=1)
+    # 作用域外(下一个 turn):走服务账号单例,不复用上一个身份的 asker JWT
+    await search_resumes(cycle_id=1)
+    a, b = route.calls[0].request, route.calls[1].request
+    assert a.headers.get("Authorization") == "Bearer token-a"
+    # 作用域外回落服务账号单例(经 login 取得服务 token tok):绝不复用 asker JWT
+    assert b.headers.get("Authorization") == "Bearer tok"
+
+
+@respx.mock
+async def test_asker_scope_empty_token_fails_closed(mock_client: BackendClient) -> None:
+    """作用域激活但 token 为空:fail-closed,绝不回落服务账号代读。"""
+    with pytest.raises(BackendError, match="缺少来问者身份"):
+        async with asker_scope(""):
+            await search_resumes(cycle_id=1)

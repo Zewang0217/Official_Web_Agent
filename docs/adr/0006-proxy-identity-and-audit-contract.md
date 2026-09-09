@@ -26,10 +26,24 @@
 | 通道 | 身份 | 权限 | 来源标识 |
 |---|---|---|---|
 | MCP 挂载(Claude Code 等) | **PAT**:用户签发给 agent 的受限 token | 用户勾选的权限码子集 ∩ agent 工具白名单 | `X-Agent-Channel: mcp` |
-| 官网对话(浮窗/管理面板) | 官网会话 JWT(随请求,agent 不存储) | 用户全量(用户在线 + interrupt 确认闸) | `X-Agent-Channel: web` |
+| 官网对话(浮窗/管理面板) | 官网会话 JWT(随请求,agent 不存储) | 问答助手只读,**按提问者本人 RBAC 权限码**收敛工具与数据;无写(纯只读问答) | `X-Agent-Channel: web` |
 | 批处理(评估流水线 cron) | `svc-agent` 服务账号(全局机器身份) | 只读 + 评估写回,最小集 | `X-Agent-Channel: pipeline` |
 
 CLI 调试入口与 MCP 同为 PAT(`X-Agent-Channel: cli`)。
+
+
+### 社团官网层问答助手:按提问者本人权限受限(2026-09-09 修订)
+
+官网对话通道只承载**只读问答助手**(M5/M6,无写工具)。原则:
+**助手从来访者本人权限行事,不借任何机器身份越权**——tool 装配按
+提问者官网 JWT 解析出的 `permissionCodes` 判断能注入哪些只读工具
+(per-tool 最低门槛权限码;列表见 SEC-02 #53 闭环后的装配表);数据请求
+一律以提问者本人 JWT 经 `get_as_user` 裸发,后端 `@PreAuthorize` 独立复核
+(两层防线)。`svc-agent` **不**参与官网在线问答的数据读取,只在批处理
+(评估流水线 cron)场景被拾起(见下节契约)。背景:服务账号曾是官网在线
+查询默认的隐身后端身份,与后端 V22(`resume:view` 撤出社员角色)不同步,
+造成「member 装配 search 工具、服务账号代读全站」的越权形态——本修订
+明确在线问答不复用服务账号代读,装配收口到权限码见 SEC-02。
 
 ### PAT(Per-user Agent Token)契约
 
@@ -78,3 +92,6 @@ CLI 调试入口与 MCP 同为 PAT(`X-Agent-Channel: cli`)。
   + refresh 7d + 365d 重授权),真有多端长期授权需求再升级。
 - 官网通道 agent 不存 token(随请求来去),token 保管面只剩 PAT(7 天短命,
   泄漏窗口有限)。
+- 官网在线问答助手按提问者本人 RBAC 只读行事:装配过滤到 permissionCodes,
+  查询走本人 JWT(get_as_user),后端独立复核——**不再以服务账号代读在线数据**;
+  旧「member 档 = 服务账号代读全站」的越权形态(V22 后)由 SEC-02 收口。

@@ -35,6 +35,7 @@ from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id
 from official_agent.tools.client import BackendError
+from official_agent.tools.readonly import asker_scope
 
 router = APIRouter()
 
@@ -355,52 +356,61 @@ async def _stream_turn(
             "cache_miss_tokens": 0,
         }
         _last_usage: dict[str, int | None] | None = None
-        try:
-            async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
-                {"messages": messages}, config=config, stream_mode=["messages", "updates"]
-            ):
-                if mode == "messages":
-                    chunk, _meta = payload
-                    if isinstance(chunk, AIMessageChunk) and chunk.content:
-                        # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
-                        text = chunk.content if isinstance(chunk.content, str) else ""
-                        if text:
-                            reply_chunks.append(text)
-                            yield sse({"type": "delta", "role": "assistant", "content": text})
-                    # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
-                    # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
-                    # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
-                    # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
-                    um = getattr(chunk, "usage_metadata", None)
-                    raw_usage = (chunk.response_metadata or {}).get("token_usage")
-                    usage_payload = raw_usage if raw_usage else um
-                    if um is not None and usage_payload:
-                        extracted = extract_usage(usage_payload)
-                        if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
-                            _last_usage = extracted
-                            for k in usage_acc:
-                                v = extracted.get(k)
-                                cur = usage_acc.get(k) or 0
-                                if v is not None:
-                                    usage_acc[k] = cur + v
-                elif mode == "updates":
-                    for _ns, node_update in payload.items():
-                        if isinstance(node_update, dict):
-                            for m in node_update.get("messages") or []:
-                                # 工具调用状态(契约 #90:tool 事件,role=tool)
-                                if getattr(m, "tool_calls", None):
-                                    for tc in m.tool_calls:
-                                        tools_called.append(tc.get("name") or "")
-                                        yield sse(
-                                            {"type": "tool", "role": "tool", "name": tc.get("name")}
-                                        )
-        except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
-            error_code = _error_code(exc)
-            yield sse({"type": "error", "code": error_code, "message": str(exc)})
-        except asyncio.CancelledError:
-            # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
-            # (partial reply/已调工具不丢失),error_code 记断连中止。
-            error_code = _ERR_DISCONNECTED
+        # 只读查询以来问者本人 JWT 执行(ADR-0006「社团官网层问答助手」):本轮
+        # 内 readonly 查询经 _read 走 get_as_user,后端按本人权限判+归因;服务
+        # 账号不再代读在线数据。ContextVar 是任务/协程链本地,经 agent 工具链
+        # 传播(端到端测试 test_react_loop_read_tool_runs_as_asker_under_scope)。
+        async with asker_scope(session.user_token):
+            try:
+                async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
+                    {"messages": messages}, config=config, stream_mode=["messages", "updates"]
+                ):
+                    if mode == "messages":
+                        chunk, _meta = payload
+                        if isinstance(chunk, AIMessageChunk) and chunk.content:
+                            # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
+                            text = chunk.content if isinstance(chunk.content, str) else ""
+                            if text:
+                                reply_chunks.append(text)
+                                yield sse({"type": "delta", "role": "assistant", "content": text})
+                        # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
+                        # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
+                        # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
+                        # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
+                        um = getattr(chunk, "usage_metadata", None)
+                        raw_usage = (chunk.response_metadata or {}).get("token_usage")
+                        usage_payload = raw_usage if raw_usage else um
+                        if um is not None and usage_payload:
+                            extracted = extract_usage(usage_payload)
+                            if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
+                                _last_usage = extracted
+                                for k in usage_acc:
+                                    v = extracted.get(k)
+                                    cur = usage_acc.get(k) or 0
+                                    if v is not None:
+                                        usage_acc[k] = cur + v
+                    elif mode == "updates":
+                        for _ns, node_update in payload.items():
+                            if isinstance(node_update, dict):
+                                for m in node_update.get("messages") or []:
+                                    # 工具调用状态(契约 #90:tool 事件,role=tool)
+                                    if getattr(m, "tool_calls", None):
+                                        for tc in m.tool_calls:
+                                            tools_called.append(tc.get("name") or "")
+                                            yield sse(
+                                                {
+                                                    "type": "tool",
+                                                    "role": "tool",
+                                                    "name": tc.get("name"),
+                                                }
+                                            )
+            except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
+                error_code = _error_code(exc)
+                yield sse({"type": "error", "code": error_code, "message": str(exc)})
+            except asyncio.CancelledError:
+                # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
+                # (partial reply/已调工具不丢失),error_code 记断连中止。
+                error_code = _ERR_DISCONNECTED
 
         # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
         # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
