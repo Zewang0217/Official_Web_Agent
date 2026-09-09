@@ -429,8 +429,11 @@ async def _stream_turn(
         # 回写之后,否则会把编造原文一并压进摘要。
         if toolless and error_code is None:
             from official_agent.security.fabrication_guard import guard_empty_tools_reply
+            from official_agent.security.pii import mask_pii_output
 
             final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
+            # #164:toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
+            final_reply, _pii_trace = mask_pii_output(final_reply)
             if verdict != "clean":
                 logging.getLogger(__name__).warning(
                     "guard_event guard_name=%s verdict=%s tool=<(empty)>",

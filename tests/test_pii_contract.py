@@ -229,6 +229,8 @@ def test_uuid6_age_decodes_rfc9562_layout() -> None:
     from official_agent.state.pg import _uuid_timestamp_age_hours
 
     now = datetime.now(UTC).timestamp()
+    if not hasattr(uuid_mod, "uuid6"):  # pragma: no cover - 3.12 生产镜像
+        pytest.skip("stdlib uuid6 需 3.14+;3.12 正确性由评审在独立运行时实证")
     u6 = str(uuid_mod.uuid6())
     age = _uuid_timestamp_age_hours(u6, now)
     assert age is not None and -1 < age < 1
@@ -258,7 +260,9 @@ def test_purge_only_suspended_threads(
             self.conn = conn
 
         def execute(self, sql, params=None):
-            if "SELECT DISTINCT thread_id" in sql:
+            if sql.startswith("DELETE"):
+                self.conn.deleted.append((sql.split("FROM")[1].strip().split(" ")[0], params[0]))
+            elif "SELECT DISTINCT thread_id" in sql:
                 self.conn.rows = [("suspended",), ("resumed",)]
             elif "FROM checkpoint_writes" in sql:
                 tid = params[0]
@@ -270,9 +274,7 @@ def test_purge_only_suspended_threads(
                 cp = "__int-old" if tid == "suspended" else "newer-after-resume"
                 self.conn.rows = [(cp,)]
             else:
-                self.conn.deleted.append(
-                    (sql.split("FROM")[1].strip().split(" ")[0], params[0])
-                )
+                raise AssertionError(f"未预期查询:{sql[:60]}")
 
         def fetchall(self):
             return self.conn.rows

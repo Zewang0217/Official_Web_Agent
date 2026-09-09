@@ -277,15 +277,16 @@ async def _run_turn(
             if mode == "messages":
                 chunk, _meta = payload
                 if isinstance(chunk, AIMessageChunk):
-                    if chunk.content:
+                    text = chunk.content if isinstance(chunk.content, str) else ""
+                    if text:
                         if buffer_reply:
-                            buffered.append(chunk.content)
+                            buffered.append(text)
                         else:
-                            out = (
-                                pii_masker.feed(chunk.content) if pii_masker else chunk.content
-                            )
+                            out = pii_masker.feed(text) if pii_masker else text
                             if out:
-                                console.print(out, end="", markup=False, highlight=False)
+                                console.print(
+                                    out, end="", markup=False, highlight=False
+                                )
                     # 工具调用状态:参数块到达时显示工具名
                     for tc in chunk.tool_call_chunks or []:
                         if tc.get("name"):

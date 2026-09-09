@@ -91,7 +91,12 @@ def mount_input_guard(fn):
 
     @functools.wraps(fn)
     async def guarded(*args, **kwargs):
+        from official_agent.security.pii import mask_pii_deep
+
         result = await fn(*args, **kwargs)
+        # #164 出口契约(出口 1):全部只读工具返回 deep 掩(#160「扩展到全部
+        # 含 PII 工具」,不再只 get_resume_detail);再包数据区+注入扫描
+        result = mask_pii_deep(result)
         text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
         wrapped, _trace = guard_tool_result(getattr(fn, "__name__", "tool"), text)
         return wrapped
