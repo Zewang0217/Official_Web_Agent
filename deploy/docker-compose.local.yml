@@ -88,7 +88,11 @@ services:
       SPRING_RABBITMQ_PASSWORD: official
       # M6 #115:管理代理指向 agent。缺省 host-gateway:支持 agent 以宿主机
       # 进程(uv run uvicorn,night-run E2E 形态)运行;整栈容器化时用
+<<<<<<< HEAD
       # AGENT_BASE_URL=http://agent:8001 docker compose up 覆盖回内网名。
+=======
+      # AGENT_BASE_URL=http://agent:8001/api/agent docker compose up 覆盖回内网名。
+>>>>>>> feat/evaluation-b1
       AGENT_BASE_URL: ${AGENT_BASE_URL:-http://host.docker.internal:8001/api/agent}
       # JWT 签名密钥(本地联调值;生产由服务器 env 提供,须 ≥256bit)
       JWT_SECRET: local-dev-secret-0123456789abcdef0123456789abcdef

@@ -141,7 +141,8 @@ def identity_message(identity: ResolvedIdentity) -> str:
 
 
 def build_model(
-    settings: Any, model: str | None = None, stream_usage: bool = False
+    settings: Any, model: str | None = None, stream_usage: bool = False,
+    temperature: float | None = None,
 ) -> Any:
     """按配置构造对话模型(GRA-08 路由的接入点)。
 
@@ -153,6 +154,7 @@ def build_model(
     兼容端点必须显式 stream_options.include_usage,且该参数只能随 stream=true
     使用(非流式 ainvoke 会 400),故只给对话主模型开;摘要器等 ainvoke 调用
     方保持缺省 False。
+    temperature:低温档(结构化评分等确定性任务用 0.1 级);缺省不动原行为。
     """
     model = model or settings.model_strong
     if settings.llm_provider == "openai-compatible":
@@ -169,11 +171,13 @@ def build_model(
             model_kwargs=(
                 {"stream_options": {"include_usage": True}} if stream_usage else {}
             ),
+            **({"temperature": temperature} if temperature is not None else {}),
         )
     # ChatAnthropic 为 pydantic **kwargs 构造器,mypy 无法静态解析字段
     return ChatAnthropic(  # type: ignore[call-arg]
         model=model,
         api_key=SecretStr(settings.anthropic_api_key) if settings.anthropic_api_key else None,  # type: ignore[arg-type]
+        **({"temperature": temperature} if temperature is not None else {}),
     )
 
 
