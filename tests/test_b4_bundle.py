@@ -1,5 +1,7 @@
 """B4 测试:错因归类/最近最好/奖项降级/兜底题组/bundle 组装(fakes)。"""
 
+import logging
+
 import pytest
 
 from official_agent.evaluation import autograding as ag
@@ -167,3 +169,46 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
     assert envelope["total_questions"] == len(fallback["questions"])
     assert sum(envelope["suggested_plan"]) <= 15
     assert fake_model.calls == 1  # 兜底线只调一次 LLM(技能题组)
+
+
+def test_ddg_provider_search_and_degrade(monkeypatch) -> None:
+    """DDG 提供方:正常出结构化结果;任何失败降级 [](→奖项不可考),不抛错。"""
+    from official_agent.evaluation.awards import DuckDuckGoProvider
+
+    provider = DuckDuckGoProvider()
+
+    class _FakeDDGS:
+        def __init__(self, timeout=10):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def text(self, query, max_results=5):
+            return [
+                {"title": "蓝桥杯", "body": "教育部指导赛事", "href": "https://example.com"}
+            ]
+
+    monkeypatch.setattr("ddgs.DDGS", _FakeDDGS)
+    results = provider._search_sync("蓝桥杯", logging.getLogger("t"))
+    assert results == [
+        {"title": "蓝桥杯", "snippet": "教育部指导赛事", "url": "https://example.com"}
+    ]
+
+    class _BoomDDGS(_FakeDDGS):
+        def text(self, query, max_results=5):
+            raise RuntimeError("unreachable")
+
+    monkeypatch.setattr("ddgs.DDGS", _BoomDDGS)
+    assert provider._search_sync("x", logging.getLogger("t")) == []
+
+
+def test_bundle_default_provider_is_ddg() -> None:
+    """用户拍板:web_search 先用 DDG(bundle 缺省提供方)。"""
+    import inspect
+
+    src = inspect.getsource(bd.run_bundle)
+    assert "DuckDuckGoProvider()" in src

@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage
 from official_agent.config import get_effective_settings
 from official_agent.evaluation import investigate_graph as ig
 from official_agent.evaluation.awards import (
-    NullSearchProvider,
+    DuckDuckGoProvider,
     base_three_questions,
     build_award_brief,
     extract_awards,
@@ -78,7 +78,7 @@ async def run_bundle(
     - 奖项线:简历有奖项 → 背景卡+纯过程追问;搜索不可用(检查点⑤)→ 不可考
     - 兜底线(#133):以上全无 → 基础三维 + 部门技能题组
     """
-    provider = search_provider or NullSearchProvider()
+    provider = search_provider or DuckDuckGoProvider()  # 检查点⑤:DDG 落地
     groups: list[dict[str, Any]] = []
     project_text = _project_text(fields)
 
