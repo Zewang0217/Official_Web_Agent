@@ -227,3 +227,52 @@ def test_build_model_openai_compatible_missing_config_fails() -> None:
     )
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
         build_model(settings)
+
+
+# ── 工具契约(GRA-04,#161):清单进首条用户消息,不进 system ──
+
+
+def test_compose_first_message_unknown_forbids_claims() -> None:
+    """空工具档(unknown):明令不得声称查询——编造守卫第一层。"""
+    from official_agent.graphs.assistant import compose_first_message
+
+    msg = compose_first_message(identity_of("unknown"))
+    assert "没有可用的数据查询工具" in msg
+    assert "绝不能声称查询过" in msg
+    assert "引导" in msg
+
+
+def test_compose_first_message_admin_lists_tools_and_failure_talk() -> None:
+    from official_agent.graphs.assistant import compose_first_message, tool_roster
+
+    msg = compose_first_message(identity_of("admin"))
+    roster = tool_roster(identity_of("admin"))
+    assert roster  # admin 有工具
+    for name in roster:
+        assert name in msg
+    assert "不要声称「查询过」" in msg
+    assert "不要编造结果" in msg
+
+
+def test_tool_contract_stays_out_of_system_prompt() -> None:
+    """静态前缀纪律:契约是角色相关的,只准在首条用户消息。"""
+    from official_agent.graphs.assistant import (
+        compose_first_message,
+        load_system_prompt,
+    )
+
+    system = load_system_prompt()
+    assert "数据查询工具:" not in system
+    assert "绝不能声称查询过" not in system
+    # 首条消息仍以身份注入开头(拼接语义)
+    assert compose_first_message(identity_of("admin")).startswith(
+        identity_message(identity_of("admin"))
+    )
+
+
+def test_tool_roster_matches_assembly() -> None:
+    from official_agent.graphs.assistant import assemble_tools, tool_roster
+
+    for role in ("admin", "member", "candidate", "unknown"):
+        identity = identity_of(role)
+        assert len(tool_roster(identity)) == len(assemble_tools(identity))

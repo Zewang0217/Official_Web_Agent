@@ -23,7 +23,8 @@ from official_agent.config import get_settings
 from official_agent.graphs.assistant import (
     assemble_tools,
     build_assistant_agent,
-    identity_message,
+    compose_first_message,
+    tool_roster,
 )
 from official_agent.graphs.identity import resolve
 from official_agent.observability import (
@@ -196,7 +197,7 @@ async def _chat(username: str, password: str, session: str) -> None:
         # 身份每轮注入(M6 #114,决策 #108 质量优先):压缩掉早期上下文后
         # 身份边界仍在最近窗口;重复注入幂等无害(同身份同文案,块很小)。
         # 失败轮未持久化 → 下轮照常重注,天然覆盖 H-2 场景。
-        first_input = HumanMessage(content=identity_message(identity))
+        first_input = HumanMessage(content=compose_first_message(identity, user_token))
         chat_history: list = []  # 仅降级路径使用:本地历史累积
         while True:
             try:
@@ -218,7 +219,13 @@ async def _chat(username: str, password: str, session: str) -> None:
                 # 降级:本地累积,保证多轮不失忆(原 CLI 语义)
                 messages = [first_input, *chat_history, HumanMessage(content=user_input)]
             try:
-                history_out = await _run_turn(agent, messages, tid, callbacks)
+                history_out = await _run_turn(
+                    agent,
+                    messages,
+                    tid,
+                    callbacks,
+                    buffer_reply=not tool_roster(identity),
+                )
                 if saver is None:
                     # 降级:用返回的累积历史推进本地会话(首轮前缀除外)
                     chat_history = [m for m in history_out if m is not first_input]
@@ -235,7 +242,14 @@ async def _chat(username: str, password: str, session: str) -> None:
                     chat_history.append(HumanMessage(content=user_input))
 
 
-async def _run_turn(agent: object, history: list, session: str, callbacks: list) -> list:
+async def _run_turn(
+    agent: object,
+    history: list,
+    session: str,
+    callbacks: list,
+    *,
+    buffer_reply: bool = False,
+) -> list:
     """跑一轮:流式打印 token 与工具状态,返回本轮增量累积的消息历史。
 
     历史也由 checkpointer 持久化(MEM-01);返回值供调用方在无 checkpointer
@@ -246,6 +260,7 @@ async def _run_turn(agent: object, history: list, session: str, callbacks: list)
     """
     console.print("[bold green]agent>[/bold green] ", end="")
     trace_token = set_turn_trace_id(session)
+    buffered: list[str] = []  # GRA-04 #161:无工具档缓冲,流尾守卫后一次性输出
     config = {
         "callbacks": callbacks,
         "configurable": {"thread_id": session},  # MEM-01:thread_id 即线程档主键
@@ -259,7 +274,12 @@ async def _run_turn(agent: object, history: list, session: str, callbacks: list)
                 chunk, _meta = payload
                 if isinstance(chunk, AIMessageChunk):
                     if chunk.content:
-                        console.print(chunk.content, end="", markup=False, highlight=False)
+                        if buffer_reply:
+                            buffered.append(chunk.content)
+                        else:
+                            console.print(
+                                chunk.content, end="", markup=False, highlight=False
+                            )
                     # 工具调用状态:参数块到达时显示工具名
                     for tc in chunk.tool_call_chunks or []:
                         if tc.get("name"):
@@ -270,6 +290,13 @@ async def _run_turn(agent: object, history: list, session: str, callbacks: list)
                         new_messages.extend(node_update.get("messages") or [])
     finally:
         reset_turn_trace_id(trace_token)
+    if buffer_reply:
+        # GRA-04 #161:无工具档整段过编造守卫后一次性输出(不再逐块打印)
+        from official_agent.security.fabrication_guard import guard_empty_tools_reply
+
+        final_reply, _verdict = guard_empty_tools_reply("".join(buffered))
+        if final_reply:
+            console.print(final_reply, markup=False, highlight=False)
     console.print()
     # 增量累积:历史=原历史+本轮全部节点新增;空消息过滤防呆。
     # 勿用末节点整体替换——真实图每节点只吐增量,替换会丢身份与提问

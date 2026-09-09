@@ -352,3 +352,32 @@ def test_chat_backend_unreachable_exits_gracefully(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 1
     assert "身份解析失败" in result.output
     readonly.set_backend_client(None)
+
+
+def test_run_turn_buffer_reply_guards_fabrication() -> None:
+    """GRA-04 #161:buffer_reply=True 时编造内容不直出,整段守卫改写。"""
+    from io import StringIO
+
+    import rich.console
+
+    history = [HumanMessage("查数据")]
+
+    class FakeToolless:
+        async def astream(self, inp, config=None, stream_mode=None):
+            yield "messages", (AIMessageChunk(content="查询结果:有 3 份简历。"), {})
+            yield "updates", {"agent": {"messages": [AIMessage("查询结果:有 3 份简历。")]}}
+
+    buf = StringIO()
+    test_console = rich.console.Console(file=buf, force_terminal=False)
+    monkeypatch: pytest.MonkeyPatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(cli_mod, "console", test_console)
+        out = asyncio.run(
+            cli_mod._run_turn(FakeToolless(), history, "s1", [], buffer_reply=True)
+        )
+    finally:
+        monkeypatch.undo()
+    printed = buf.getvalue()
+    assert "查询结果:有 3 份简历" not in printed  # 编造原文不直出
+    assert "没有可用的数据查询权限" in printed  # 改写后的诚实话术
+    assert out[-1].content == "查询结果:有 3 份简历。"  # 历史累积不动(守卫只管输出面)

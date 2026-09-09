@@ -26,7 +26,11 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from official_agent.graphs.assistant import build_assistant_agent, identity_message
+from official_agent.graphs.assistant import (
+    build_assistant_agent,
+    compose_first_message,
+    tool_roster,
+)
 from official_agent.graphs.assistant.compression import (
     maybe_compress,
     summarize_messages,
@@ -338,7 +342,9 @@ async def _stream_turn(
         # M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)——
         # 压缩掉早期上下文后身份边界仍在最近窗口;前缀含首轮身份段,
         # 同 session 内缓存仍命中(身份块小,重注成本可忽略)。
-        first_input = HumanMessage(content=identity_message(session.identity))
+        first_input = HumanMessage(
+            content=compose_first_message(session.identity, session.user_token)
+        )
         messages: list = [first_input, HumanMessage(content=message)]
 
         # 契约 #90:首事件 session(带 created 标记新/续传)
@@ -347,6 +353,8 @@ async def _stream_turn(
         started = time.monotonic()
         tools_called: list[str] = []
         reply_chunks: list[str] = []
+        # GRA-04 #161:无工具档缓冲整段回复,流尾过编造守卫后一次性下发
+        toolless = not tool_roster(session.identity)
         error_code: str | None = None
         usage_acc: dict[str, int | None] = {  # 跨 model 步累计(#113 MAJOR:ReAct 多步求和)
             "input_tokens": 0,
@@ -366,7 +374,10 @@ async def _stream_turn(
                         text = chunk.content if isinstance(chunk.content, str) else ""
                         if text:
                             reply_chunks.append(text)
-                            yield sse({"type": "delta", "role": "assistant", "content": text})
+                            if not toolless:
+                                yield sse(
+                                    {"type": "delta", "role": "assistant", "content": text}
+                                )
                     # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
                     # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
                     # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
@@ -407,6 +418,20 @@ async def _stream_turn(
         # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
         from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
 
+        # GRA-04 #161:编造守卫在一切持久化之前——直播(缓冲 delta)、
+        # conversation_log、checkpointer(回看/下轮上下文)三面同用改写文本。
+        # 压缩(_compress_if_needed 会 update_state 重写历史)必须排在守卫
+        # 回写之后,否则会把编造原文一并压进摘要。
+        if toolless and error_code is None:
+            from official_agent.security.fabrication_guard import guard_empty_tools_reply
+
+            final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
+            if verdict != "clean":
+                reply_chunks = [final_reply]
+                await _rewrite_last_ai_message(session.agent, config, final_reply)
+            if final_reply:
+                yield sse({"type": "delta", "role": "assistant", "content": final_reply})
+
         # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
         compress_event = await _compress_if_needed(session, config, message)
@@ -438,6 +463,34 @@ async def _stream_turn(
             yield sse({"type": "done", "session_id": session.session_id})
     finally:
         session.turn_lock.release()
+
+
+async def _rewrite_last_ai_message(agent: Any, config: dict, final_reply: str) -> None:
+    """编造守卫回写:checkpointer 里最后一条 AI 消息替换为改写文本(#161)。
+
+    覆盖三条持久化面的 checkpointer 一支:管理端/用户回看不再返回编造原文,
+    下一轮模型上下文也不再反向强化 GRA-04。无 checkpointer(纯内存)时
+    get_state 无消息,自然跳过;任何失败 fail-open 只告警(ADR-0005)。
+    """
+    import logging
+
+    from langchain_core.messages import AIMessage, RemoveMessage
+
+    try:
+        state = await agent.aget_state(config)
+        msgs = (state.values or {}).get("messages") or []
+        last = msgs[-1] if msgs else None
+        if last is None or not getattr(last, "content", ""):
+            return
+        if not getattr(last, "id", None):
+            return  # RemoveMessage 按 id 匹配,空 id 会只增不删(编造原文留存)
+        await agent.aupdate_state(
+            config, {"messages": [RemoveMessage(id=last.id), AIMessage(content=final_reply)]}
+        )
+    except Exception:  # noqa: BLE001 — 回写失败不阻断 done
+        logging.getLogger(__name__).warning(
+            "编造守卫回写 checkpointer 失败(已忽略)", exc_info=True
+        )
 
 
 def _log_conversation(

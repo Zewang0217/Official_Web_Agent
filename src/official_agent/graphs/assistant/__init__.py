@@ -136,6 +136,38 @@ def identity_message(identity: ResolvedIdentity) -> str:
     )
 
 
+def tool_roster(identity: ResolvedIdentity) -> list[str]:
+    """当前身份装配到的工具名清单(unknown 档为空)。"""
+    return list(_ROLE_TOOL_NAMES.get(identity.get("role", "unknown"), ()))
+
+
+def compose_first_message(identity: ResolvedIdentity, user_token: str = "") -> str:
+    """首条用户消息 = 身份注入 + 工具契约(GRA-04,#161)。
+
+    工具清单随角色变化,与身份同理只进首条用户消息(静态前缀纪律):
+    - 有工具档:列清单,只准陈述工具真实返回的内容,失败/被拒必须如实
+      说明并引导人工,不得编造;
+    - 空工具档(unknown):明令不得声称查询过任何数据(编造守卫第一层,
+      输出守卫 fabrication_guard 是第二层兜底)。
+
+    名单单源 tool_roster(_ROLE_TOOL_NAMES);装配过滤演化时两者仍须一致
+    (test_tool_roster_matches_assembly 钉住)。"""
+    names = tool_roster(identity)
+    if not names:
+        contract = (
+            "你没有可用的数据查询工具:绝不能声称查询过任何数据、给出「查询结果」"
+            "或编造数据。用户要求数据时,说明你当前没有查询权限,"
+            "引导其通过管理端或人工渠道获取。"
+        )
+    else:
+        contract = (
+            f"本次会话可用的数据查询工具:{', '.join(names)}。"
+            "只陈述这些工具真实返回的内容;工具没有返回的信息,不要声称「查询过」。"
+            "工具调用失败或被拒绝时,如实说明无法查询并引导人工渠道,不要编造结果。"
+        )
+    return identity_message(identity) + "\n" + contract
+
+
 def build_model(
     settings: Any, model: str | None = None, stream_usage: bool = False,
     temperature: float | None = None,
