@@ -39,7 +39,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
 # 1) 镜像(发布机):docker build -t boyuanclub/official-agent:<tag> . && docker push ...(#104 同名 org)
 # 2) 服务器:克隆 Agent 仓库到 deploy 目录,cp .env.prod.example .env.prod 填真实值
 #    (BACKEND_BASE_URL / AGENT_PG_PASSWORD / LLM key;gitignore,永不进仓库)
-# 3) cd deploy && docker compose -f docker-compose.prod.yml up -d
+# 3) cd deploy && docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+#    (--env-file 必须带:compose 的变量插值只默认读 .env,不读 .env.prod;
+#     漏了会报 "required variable AGENT_PG_PASSWORD is missing a value"。
+#     compose 里的 env_file: 只负责注入容器,不参与插值 —— 两回事。)
 # 4) nginx:把 deploy/nginx/agent.prod.conf.example 的 location 块并入现有官网
 #    server{}(假设①:不另起 nginx 容器),nginx -t && nginx -s reload
 # 5) 验证:curl 127.0.0.1:8001/health(服务器本机)→ 经域名 /api/agent/health
@@ -51,7 +54,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
 - 重启策略:`unless-stopped` + HEALTHCHECK(/health 30s×3)自动拉起。
 - 扩副本:`--scale agent=N` 目前**不可用**(进程内会话表 `_sessions` 单机语义);
   会话层外置(Ably,M3)后才放开 —— #116 已声明单 worker 起步。
-- 回滚:`AGENT_VERSION=<上一 tag> docker compose -f docker-compose.prod.yml up -d`。
+- 回滚:`AGENT_VERSION=<上一 tag> docker compose --env-file .env.prod -f docker-compose.prod.yml up -d`。
 - 限流:nginx `limit_req_zone/limit_req` 与 agent 层位置均已预留,参数等 #56/SEC-05。
 
 ## 本地测试账号与种子数据
