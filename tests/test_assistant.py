@@ -210,7 +210,12 @@ async def test_react_loop_read_tool_runs_as_asker_under_scope(
     BASE = "http://backend.test"
     route = respx.get(f"{BASE}/api/cycles/open").mock(
         return_value=httpx.Response(
-            200, json={"code": 200, "message": "ok", "data": [{"cycleId": 2, "cycleName": "2025 秋招"}]}
+            200,
+            json={
+                "code": 200,
+                "message": "ok",
+                "data": [{"cycleId": 2, "cycleName": "2025 秋招"}],
+            },
         )
     )
     settings = Settings(

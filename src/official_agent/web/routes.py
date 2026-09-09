@@ -398,7 +398,11 @@ async def _stream_turn(
                                         for tc in m.tool_calls:
                                             tools_called.append(tc.get("name") or "")
                                             yield sse(
-                                                {"type": "tool", "role": "tool", "name": tc.get("name")}
+                                                {
+                                                    "type": "tool",
+                                                    "role": "tool",
+                                                    "name": tc.get("name"),
+                                                }
                                             )
             except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
                 error_code = _error_code(exc)
