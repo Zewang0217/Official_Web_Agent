@@ -5,6 +5,7 @@ from collections.abc import Iterator  # noqa: E402
 from typing import Any, cast
 
 import pytest
+import respx
 from langchain_core.callbacks import CallbackManagerForLLMRun  # noqa: E402
 from langchain_core.language_models.chat_models import (  # noqa: E402
     BaseChatModel,
@@ -162,6 +163,68 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
     assert isinstance(msgs[2], ToolMessage) and msgs[2].name == "get_open_cycle"
     assert "cycleId" in str(msgs[2].content) or "2025" in str(msgs[2].content)
     assert "2025 秋招" in msgs[-1].content
+
+
+@respx.mock
+async def test_react_loop_read_tool_runs_as_asker_under_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A·SEC-02 端到端:asker_scope 在 web turn 开启,经真实 LangGraph agent
+    (非直调)驱动一个真只读工具(get_open_cycle → readonly._read)时,后端请求
+    必须以来问者本人 JWT 身份(get_as_user),而非服务账号。
+
+    这是对「ContextVar 从 web 层跨 agent 工具链传播」的证明——单测直调函数
+    覆盖不到这段;若 LangGraph 工具执行脱离开启作用域的协程/任务,此测试必红。
+    """
+    import httpx
+
+    from official_agent.config import Settings
+    from official_agent.graphs.assistant import build_assistant_agent
+    from official_agent.tools.client import BackendClient
+    from official_agent.tools.readonly import _ASKER_TOKEN, asker_scope, set_backend_client
+
+    BASE = "http://backend.test"
+    route = respx.get(f"{BASE}/api/cycles/open").mock(
+        return_value=httpx.Response(
+            200, json={"code": 200, "message": "ok", "data": [{"cycleId": 2, "cycleName": "2025 秋招"}]}
+        )
+    )
+    settings = Settings(
+        _env_file=None,
+        backend_base_url=BASE,
+        backend_service_username="svc",
+        backend_service_password="secret",
+    )
+    client = BackendClient(http=httpx.AsyncClient(base_url=BASE), settings=settings)
+    set_backend_client(client)
+    try:
+        seq = iter(
+            [
+                AIMessage(
+                    "", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "call_1"}]
+                ),
+                AIMessage("当前有 1 个开放周期:2025 秋招(cycleId=2)。"),
+            ]
+        )
+        fake_model = _FakeToolCallingModel(messages=seq)
+
+        import official_agent.graphs.assistant as assistant_mod
+
+        # 不 patch _ALL_TOOLS 的 get_open_cycle:保留真工具,让其经 _read 真实取数
+        monkeypatch.setattr(
+            assistant_mod, "ChatAnthropic", lambda **kwargs: fake_model, raising=True
+        )
+        agent = build_assistant_agent(identity_of("admin"))
+        assert "get_open_cycle" in assistant_mod._ALL_TOOLS
+        assert _ASKER_TOKEN.get() is None  # 无污染前提
+        async with asker_scope("asker-jwt-xyz"):
+            await agent.ainvoke({"messages": [HumanMessage("现在有开放周期吗?")]})
+        assert _ASKER_TOKEN.get() is None  # 作用域结束已复位
+        assert route.calls, "真 get_open_cycle 应经 _read 命中后端"
+        assert route.calls[-1].request.headers.get("Authorization") == "Bearer asker-jwt-xyz"
+    finally:
+        await client.aclose()
+        set_backend_client(None)
 
 
 def test_role_tool_tables_stay_consistent() -> None:
