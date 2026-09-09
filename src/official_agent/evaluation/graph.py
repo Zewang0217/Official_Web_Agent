@@ -25,6 +25,7 @@ from official_agent.evaluation.scoring import (
 )
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
+from official_agent.security.injection_guard import wrap_data_zone
 
 PROMPT_FILE = "evaluation_scoring.md"
 CARD_SCHEMA_VERSION = "evaluation_scorecard/v1"
@@ -147,7 +148,9 @@ async def llm_score(state: EvaluationState) -> dict:
         blocks = [
             "### "
             + (f.get("title") or f["field_key"])
-            + f" (field_key={f['field_key']})\n{f.get('value', '')}"
+            + f" (field_key={f['field_key']})\n"
+            # #163:简历=不可信输入,原文包数据区标签(prompt 侧配数据区纪律)
+            + wrap_data_zone(f"resume:{f['field_key']}", str(f.get("value", "")))
             for f in state["fields"]
         ]
         prompt_text = (

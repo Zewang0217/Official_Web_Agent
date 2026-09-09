@@ -223,10 +223,15 @@ async def explore_repo(
                     ]
                     written_slots.extend(hit)
                 # OpenAI 序纪律:ToolMessage 必须紧跟 assistant tool_calls 连续出现,
-                # 中间不得插入其他角色消息(真机 400 实测)
+                # 中间不得插入其他角色消息(真机 400 实测)。
+                # #163:模型面的工具返回过注入守卫(数据区标签+扫描);dossier
+                # 仍存原始证据(出题材料不被标注污染)。
+                from official_agent.security.injection_guard import guard_tool_result
+
+                guarded, _trace = guard_tool_result(tool_name, observation[:2000] or "(空结果)")
                 messages.append(
                     ToolMessage(
-                        observation[:2000] or "(空结果)",
+                        guarded,
                         tool_call_id=tc.get("id") or "",
                         name=tool_name,
                     )

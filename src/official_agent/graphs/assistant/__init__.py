@@ -26,6 +26,7 @@ from pydantic import SecretStr
 
 from official_agent.config import get_effective_settings
 from official_agent.graphs.identity import ResolvedIdentity
+from official_agent.security.injection_guard import mount_input_guard
 from official_agent.tools import readonly
 
 _PROMPT_FILE = Path(__file__).parent.parent.parent / "prompts" / "assistant.md"
@@ -100,10 +101,13 @@ def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
     names = _ROLE_TOOL_NAMES.get(identity.get("role", "unknown"), ())
     tools = []
     for name in names:
-        if name == "get_my_interview":
-            tools.append(_bind_my_interview(user_token))
-        else:
-            tools.append(_ALL_TOOLS[name])
+        raw = (
+            _bind_my_interview(user_token)
+            if name == "get_my_interview"
+            else _ALL_TOOLS[name]
+        )
+        # GRA-04/#163:工具返回出口统一过注入守卫(数据区标签+确定性扫描)
+        tools.append(mount_input_guard(raw))
     return tools
 
 
