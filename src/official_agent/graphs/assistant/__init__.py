@@ -181,15 +181,18 @@ def build_assistant_agent(
     identity: ResolvedIdentity,
     user_token: str = "",
     checkpointer: Any | None = None,
+    stream_usage: bool = True,
 ) -> Any:
     """构建 A 模块 ReAct agent。调用方(CLI/SSE)负责身份解析与消息装配,
     并把 langfuse_callbacks 挂到 invoke 的 config(fail-open,ADR-0005)。
 
     checkpointer(MEM-01):传 AsyncPostgresSaver 则启用多轮持久化;
-    None 则纯内存(CLI --session 标识仅作 trace 用)。"""
+    None 则纯内存(CLI --session 标识仅作 trace 用)。
+    stream_usage:openai-compatible 端点只许 stream_options 随 stream=true 出现,
+    非流式 ainvoke 调用方(eval runner #148)必须传 False。"""
     settings = get_effective_settings()
     return create_agent(
-        build_model(settings, stream_usage=True),
+        build_model(settings, stream_usage=stream_usage),
         tools=assemble_tools(identity, user_token),
         system_prompt=load_system_prompt(),
         checkpointer=checkpointer,
