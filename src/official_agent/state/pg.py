@@ -62,17 +62,26 @@ _INTERRUPT_CHANNEL = "__interrupt__"
 
 
 def _uuid_timestamp_age_hours(checkpoint_id: str, now: float) -> float | None:
-    """从 checkpoint id(UUID,langgraph 为时间有序变体)解析年龄(小时)。
+    """从 checkpoint id 解析年龄(小时)。仅接受 RFC9562 v6(langgraph 时间
+    有序 id);其他版本/非 UUID → None(宁可不删不可误删)。
 
-    解析失败返回 None(调用方跳过该行,宁可不删不可误删)。"""
+    v6 的 60 位 unix 时间戳按 hi/mid/low 重排——py3.12 的 stdlib .time 按
+    v1 字段序解码会得到垃圾值(评审 P0 实测 3117 年),必须显式重排。"""
     import uuid
     from datetime import datetime
 
     try:
-        ts = uuid.UUID(checkpoint_id).time  # 100ns since 1582-10-15
-        created = datetime.fromtimestamp((ts - 0x01B21DD213814000) / 1e7, tz=UTC)
+        u = uuid.UUID(checkpoint_id)
+    except ValueError:
+        return None
+    if u.version != 6:
+        return None
+    i = u.int
+    ts_100ns = ((i >> 96) << 28) | ((i >> 80 & 0xFFFF) << 12) | ((i >> 64) & 0xFFF)
+    try:
+        created = datetime.fromtimestamp((ts_100ns - 0x01B21DD213814000) / 1e7, tz=UTC)
         return (now - created.timestamp()) / 3600
-    except (ValueError, OSError, OverflowError):
+    except (OSError, OverflowError):
         return None
 
 
@@ -111,15 +120,24 @@ def purge_expired_interrupts(
         thread_ids = [r[0] for r in cur.fetchall()]
         purged = 0
         for tid in thread_ids:
+            # 挂起 vs 已恢复判别(评审 P1):最新事件仍是 __interrupt__ 写入
+            # 才是「挂起未恢复」;恢复后闲置的 thread 不动(上下文不丢)
+            cur.execute(
+                "SELECT max(checkpoint_id) FROM checkpoint_writes "
+                "WHERE thread_id = %s AND channel = %s",
+                (tid, _INTERRUPT_CHANNEL),
+            )
+            row = cur.fetchone()
+            int_cp = row[0] if row else None
             cur.execute(
                 "SELECT max(checkpoint_id) FROM checkpoints WHERE thread_id = %s",
                 (tid,),
             )
             row = cur.fetchone()
-            cid = row[0] if row else None
-            if not cid:
+            last_cp = row[0] if row else None
+            if not int_cp or not last_cp or str(int_cp) != str(last_cp):
                 continue
-            age = _uuid_timestamp_age_hours(str(cid), now)
+            age = _uuid_timestamp_age_hours(str(last_cp), now)
             if age is None or age < max_age_hours:
                 continue
             for table in _CHECKPOINT_TABLES:

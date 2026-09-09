@@ -12,6 +12,7 @@ Langfuse callbacks fail-open 挂载(OBS-01)。
 """
 
 import asyncio
+import logging
 import time
 
 import httpx
@@ -32,6 +33,7 @@ from official_agent.observability import (
     reset_turn_trace_id,
     set_turn_trace_id,
 )
+from official_agent.security.pii import ReplyPiiMasker, mask_pii_output
 from official_agent.state.audit import ensure_audit_table
 from official_agent.state.pg import get_checkpointer
 from official_agent.state.threads import (
@@ -261,6 +263,8 @@ async def _run_turn(
     console.print("[bold green]agent>[/bold green] ", end="")
     trace_token = set_turn_trace_id(session)
     buffered: list[str] = []  # GRA-04 #161:无工具档缓冲,流尾守卫后一次性输出
+    # #164:直印路径逐块过 PII 掩码器(buffer 分支由守卫整段处理)
+    pii_masker = None if buffer_reply else ReplyPiiMasker()
     config = {
         "callbacks": callbacks,
         "configurable": {"thread_id": session},  # MEM-01:thread_id 即线程档主键
@@ -277,9 +281,11 @@ async def _run_turn(
                         if buffer_reply:
                             buffered.append(chunk.content)
                         else:
-                            console.print(
-                                chunk.content, end="", markup=False, highlight=False
+                            out = (
+                                pii_masker.feed(chunk.content) if pii_masker else chunk.content
                             )
+                            if out:
+                                console.print(out, end="", markup=False, highlight=False)
                     # 工具调用状态:参数块到达时显示工具名
                     for tc in chunk.tool_call_chunks or []:
                         if tc.get("name"):
@@ -292,8 +298,6 @@ async def _run_turn(
         reset_turn_trace_id(trace_token)
     if buffer_reply:
         # GRA-04 #161:无工具档整段过编造守卫后一次性输出(不再逐块打印)
-        import logging
-
         from official_agent.security.fabrication_guard import guard_empty_tools_reply
 
         final_reply, verdict = guard_empty_tools_reply("".join(buffered))
@@ -301,11 +305,13 @@ async def _run_turn(
             logging.getLogger(__name__).warning(
                 "guard_event guard_name=%s verdict=%s", "fabrication_empty_tools", verdict
             )
-        from official_agent.security.pii import mask_pii_output
-
         final_reply, pii_trace = mask_pii_output(final_reply)
         if final_reply:
             console.print(final_reply, markup=False, highlight=False)
+    elif pii_masker:
+        tail = pii_masker.finish()
+        if tail:
+            console.print(tail, end="", markup=False, highlight=False)
     console.print()
     # 增量累积:历史=原历史+本轮全部节点新增;空消息过滤防呆。
     # 勿用末节点整体替换——真实图每节点只吐增量,替换会丢身份与提问

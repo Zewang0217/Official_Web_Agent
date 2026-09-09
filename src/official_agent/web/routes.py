@@ -37,6 +37,7 @@ from official_agent.graphs.assistant.compression import (
 )
 from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
+from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id
 from official_agent.tools.client import BackendError
 
@@ -355,6 +356,8 @@ async def _stream_turn(
         reply_chunks: list[str] = []
         # GRA-04 #161:无工具档缓冲整段回复,流尾过编造守卫后一次性下发
         toolless = not tool_roster(session.identity)
+        # #164 出口契约:流式 delta 逐块过 PII 掩码器(尾部缓冲抗跨块)
+        pii_masker = None if toolless else ReplyPiiMasker()
         error_code: str | None = None
         usage_acc: dict[str, int | None] = {  # 跨 model 步累计(#113 MAJOR:ReAct 多步求和)
             "input_tokens": 0,
@@ -374,10 +377,12 @@ async def _stream_turn(
                         text = chunk.content if isinstance(chunk.content, str) else ""
                         if text:
                             reply_chunks.append(text)
-                            if not toolless:
-                                yield sse(
-                                    {"type": "delta", "role": "assistant", "content": text}
-                                )
+                            if pii_masker:
+                                out = pii_masker.feed(text)
+                                if out:
+                                    yield sse(
+                                        {"type": "delta", "role": "assistant", "content": out}
+                                    )
                     # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
                     # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
                     # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
@@ -436,6 +441,14 @@ async def _stream_turn(
                 await _rewrite_last_ai_message(session.agent, config, final_reply)
             if final_reply:
                 yield sse({"type": "delta", "role": "assistant", "content": final_reply})
+
+        # #164 出口契约(出口 5):回复出口 PII 守卫——全部会话适用。流式
+        # delta 经 ReplyPiiMasker 逐块掩(尾部缓冲抗跨块);工具侧 deep 掩为
+        # 主,此处为输出面兜底;命中即 trace(guard_event)。
+        if pii_masker:
+            tail = pii_masker.finish()
+            if tail:
+                yield sse({"type": "delta", "role": "assistant", "content": tail})
 
         # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。

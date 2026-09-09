@@ -86,18 +86,57 @@ def mask_pii_output(text: str) -> tuple[str, dict | None]:
 
     与确定性拦截(不发送)不同:PII 检出**替换后照发**,不拦截不重试
     (#160 决议 §3)。返回 (最终文本, trace);trace 仅命中时非 None:
-    {guard_name: pii_output, verdict: "masked", reason: 规则名}。"""
+    {guard_name: pii_output, verdict: "masked", reason: 命中规则名}。"""
     if not text:
         return text, None
     masked = mask_pii(text)
     if masked == text:
         return text, None
+    rule = _matched_rule(text) or "pii_pattern"
     trace = {
         "guard_name": GUARD_NAME_PII_OUTPUT,
         "verdict": "masked",
-        "reason": "回复检出 PII 形态,已掩码替换(#164)",
+        "reason": f"命中规则:{rule}",
     }
     logging.getLogger(__name__).warning(
-        "guard_event guard_name=%s verdict=masked rule=pii_reply", GUARD_NAME_PII_OUTPUT
+        "guard_event guard_name=%s verdict=masked rule=%s", GUARD_NAME_PII_OUTPUT, rule
     )
     return masked, trace
+
+
+def _matched_rule(text: str) -> str:
+    for name, (pattern, _repl) in {
+        "phone": _MASK_RULES[0],
+        "id_card": _MASK_RULES[1],
+        "email": _MASK_RULES[2],
+        "qq": _MASK_RULES[3],
+    }.items():
+        if pattern.search(text):
+            return name
+    return ""
+
+
+class ReplyPiiMasker:
+    """流式回复的逐块 PII 掩码器(#164):尾部缓冲抗跨块切分。
+
+    feed(chunk) 返回可安全下发的文本(保留 32 字符尾缓冲,防手机号/邮箱被
+    chunk 边界切开漏掩);finish() 冲洗残余。掩码幂等(已掩文本重掩不变)。"""
+
+    _TAIL = 32
+
+    def __init__(self) -> None:
+        self.buffer = ""
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        self.buffer += chunk
+        masked = mask_pii(self.buffer)
+        keep = min(len(masked), self._TAIL)
+        self.buffer = masked[-keep:]
+        return masked[:-keep]
+
+    def finish(self) -> str:
+        tail = mask_pii(self.buffer)
+        self.buffer = ""
+        return tail

@@ -215,3 +215,87 @@ def test_uuid_timestamp_age_parses_and_flags() -> None:
     assert _uuid_timestamp_age_hours("not-a-uuid", now) is None
     garbage_age = _uuid_timestamp_age_hours(str(uuid_mod.uuid4()), now)
     assert garbage_age is None or garbage_age < 24  # 不会误删语义
+
+
+# ── TTL v6 解码与挂起判别(评审 P0/P1 回归) ──
+
+
+def test_uuid6_age_decodes_rfc9562_layout() -> None:
+    """评审 P0 回归:stdlib .time 在 3.12 上按 v1 序解码会得垃圾——实现必须
+    显式 v6 重排。以「现在」生成的 uuid6 年龄应 <1h。"""
+    import uuid as uuid_mod
+    from datetime import datetime
+
+    from official_agent.state.pg import _uuid_timestamp_age_hours
+
+    now = datetime.now(UTC).timestamp()
+    u6 = str(uuid_mod.uuid6())
+    age = _uuid_timestamp_age_hours(u6, now)
+    assert age is not None and -1 < age < 1
+
+
+def test_uuid4_and_garbage_return_none() -> None:
+    import uuid as uuid_mod
+    from datetime import datetime
+
+    from official_agent.state.pg import _uuid_timestamp_age_hours
+
+    now = datetime.now(UTC).timestamp()
+    assert _uuid_timestamp_age_hours("not-a-uuid", now) is None
+    assert _uuid_timestamp_age_hours(str(uuid_mod.uuid4()), now) is None  # v4 → None
+
+
+def test_purge_only_suspended_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """挂起未恢复(interrupt 写入=最新事件)→ 三表清理;已恢复 → 不动(P1)。"""
+    from official_agent.state import pg
+
+    monkeypatch.setattr(pg, "_uuid_timestamp_age_hours", lambda cid, now: 30.0)
+
+    class _Cursor:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def execute(self, sql, params=None):
+            if "SELECT DISTINCT thread_id" in sql:
+                self.conn.rows = [("suspended",), ("resumed",)]
+            elif "FROM checkpoint_writes" in sql:
+                tid = params[0]
+                # suspended:interrupt 写入即最新事件;resumed:interrupt 是旧事件
+                cp = "__int-old" if tid == "suspended" else "old-int-cp"
+                self.conn.rows = [(cp,)]
+            elif "max(checkpoint_id) FROM checkpoints" in sql:
+                tid = params[0]
+                cp = "__int-old" if tid == "suspended" else "newer-after-resume"
+                self.conn.rows = [(cp,)]
+            else:
+                self.conn.deleted.append(
+                    (sql.split("FROM")[1].strip().split(" ")[0], params[0])
+                )
+
+        def fetchall(self):
+            return self.conn.rows
+
+        def fetchone(self):
+            return self.conn.rows[-1] if self.conn.rows else None
+
+    class _Conn:
+        def __init__(self):
+            self.deleted = []
+            self.rows = []
+
+        def cursor(self):
+            return _Cursor(self)
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    conn = _Conn()
+    purged = pg.purge_expired_interrupts(max_age_hours=24, conn=conn)
+    assert purged == 1  # 只有挂起未恢复的 suspended 被清
+    assert any(t == "checkpoints" for t, _ in conn.deleted)
+    assert any(tid == "resumed" for _, tid in conn.deleted) is False
