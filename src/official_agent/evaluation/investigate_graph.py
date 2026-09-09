@@ -154,36 +154,60 @@ async def generate_node(state: InvestigationState) -> dict:
             )
             + "\n只输出符合 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
         )
-        resp = await model.ainvoke([HumanMessage(content=prompt_text)])
-        raw = resp.content
-        if isinstance(raw, list):
-            raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
-        content = raw if isinstance(raw, str) else str(raw)
-        result = QuestionSet.model_validate_json(_extract_json(content))
-        # strict 后置校验(P1 同款):题数/锚/路径三重一致性
-        if deep and len(result.questions) != count:
-            raise ValueError(f"题数不符:要求 {count},模型给 {len(result.questions)}")
-        if not deep and len(result.questions) > 2:
-            raise ValueError(f"引导题超量:{len(result.questions)}")
+        # 生成 + strict 后置校验,不合规时带原因纠正重试一次(B3 评审同款纪律)
         paths = set(state.get("paths", []))
         paths_truncated = bool(state.get("paths_truncated"))
-        anchors: set[str] = set()
-        for q in result.questions:
-            if deep:
-                if not q.evidence.path:
+        result: QuestionSet | None = None
+        last_err: ValueError | None = None
+        corrective = ""
+        for _attempt in range(2):
+            resp = await model.ainvoke(
+                [HumanMessage(content=prompt_text + corrective)]
+            )
+            raw = resp.content
+            if isinstance(raw, list):
+                raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
+            content = raw if isinstance(raw, str) else str(raw)
+            try:
+                result = QuestionSet.model_validate_json(_extract_json(content))
+                # strict 后置校验(P1 同款):题数/锚/路径三重一致性
+                if deep and len(result.questions) != count:
                     raise ValueError(
-                        f"deep_dive 题缺 evidence.path:{q.question[:30]!r}"
+                        f"题数不符:要求 {count},模型给 {len(result.questions)}"
                     )
-                # 树被 GitHub 截断时白名单不完整,放宽成员校验(评审 P2)
-                if not paths_truncated and q.evidence.path not in paths:
-                    raise ValueError(f"evidence.path 不在仓内:{q.evidence.path!r}")
-                if q.anchor == "guided":
-                    raise ValueError("deep_dive 题不得用 guided 锚")
-                anchors.add(q.anchor)
-            elif q.evidence.path:
-                raise ValueError("guided 题不应带仓路径")
-        if deep and count == 4 and len(anchors) != 4:
-            raise ValueError("high 值得度应四锚各一题")
+                if not deep and len(result.questions) > 2:
+                    raise ValueError(f"引导题超量:{len(result.questions)}")
+                anchors: set[str] = set()
+                for q in result.questions:
+                    if deep:
+                        if not q.evidence.path:
+                            raise ValueError(
+                                f"deep_dive 题缺 evidence.path:{q.question[:30]!r}"
+                            )
+                        # 树被 GitHub 截断时白名单不完整,放宽成员校验(评审 P2)
+                        if not paths_truncated and q.evidence.path not in paths:
+                            raise ValueError(
+                                f"evidence.path 不在仓内:{q.evidence.path!r}"
+                            )
+                        if q.anchor == "guided":
+                            raise ValueError("deep_dive 题不得用 guided 锚")
+                        anchors.add(q.anchor)
+                    elif q.evidence.path:
+                        raise ValueError("guided 题不应带仓路径")
+                if deep and count == 4 and len(anchors) != 4:
+                    raise ValueError("high 值得度应四锚各一题")
+                last_err = None
+                break
+            except ValueError as ve:
+                last_err = ve
+                result = None
+                corrective = (
+                    f"\n\n【纠正】你上一次的输出不合规:{ve}"
+                    "\n请修正后重新输出完整 JSON(evidence.path 必须是上面"
+                    "文件结构里逐字真实的路径)。"
+                )
+        if result is None or last_err is not None:
+            raise ValueError(f"两次输出均不合规:{last_err}")
         return {"question_set": _dump(result, deep), "error": None}
     except Exception as exc:  # noqa: BLE001 — 失败进 error 态,B2 可重试
         return {"question_set": None, "error": f"{type(exc).__name__}: {exc}"}
