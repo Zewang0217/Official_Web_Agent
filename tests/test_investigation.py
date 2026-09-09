@@ -19,6 +19,19 @@ def test_extract_repo_tolerates_git_suffix_and_noise() -> None:
     assert inv.extract_repo("只有文字没有链接") is None
 
 
+def test_extract_repos_returns_all_and_dedupes() -> None:
+    """M-1:多仓候选不再只取第一个;保序+去重;.git/尾随标点清洗。"""
+    text = (
+        "前端 https://github.com/me/web.git 后端 "
+        "github.com/me/api, 重复 https://github.com/me/web"
+    )
+    assert inv.extract_repos(text) == [("me", "web"), ("me", "api")]
+    assert inv.extract_repos("没有链接") == []
+    assert inv.extract_repos("github.com/owner/repo.") == [("owner", "repo")]
+    # extract_repo 仍是首个(向后兼容)
+    assert inv.extract_repo(text) == ("me", "web")
+
+
 def test_route_three_ways() -> None:
     long_text = "我做了社团官网重构,负责报名页与后端接口。" * 3
     assert inv.route_project(long_text, True) == "deep_dive"  # 有仓可读
@@ -319,3 +332,45 @@ async def test_count_mismatch_rejected(monkeypatch) -> None:
     _install_fake_gh_and_model(monkeypatch, one_q)
     with pytest.raises(RuntimeError, match="题数不符"):
         await ig.run_investigation("项目 https://github.com/me/demo 报名页")
+
+@pytest.mark.asyncio
+async def test_deep_dive_allow_empty_path_with_note(monkeypatch) -> None:
+    """M-3:纯技术栈/设计哲学取向题可无单一仓内文件锚点(path 空 + note)。
+
+    旧版(必带仓路径)会把这类合法问题当失败;v2 设计取向问放宽。
+    """
+    payload = (
+        '{"repo_summary": "这个项目是什么", "questions": ['
+        + _q("tradeoff", "", "为什么选这个技术栈?")
+        + ","
+        + _q("architecture", "", "为什么这样分层?")
+        + ","
+        + _q("tradeoff", "", "放弃过什么替代方案?")
+        + ","
+        + _q("edge_case", "", "规模上升时怎么撑住?")
+        + "]}"
+    )
+    _install_fake_gh_and_model(monkeypatch, payload)
+    qs = await ig.run_investigation("项目 https://github.com/me/demo 报名页")
+    assert qs["questions"][0]["evidence"]["path"] == ""
+    # 空路径但 note 非空才合法(提示词要求 note 解释为何不落单路径)
+    assert qs["questions"][0]["evidence"]["note"]  # note 默认 "n"(见 _q)
+
+
+@pytest.mark.asyncio
+async def test_deep_dive_not_forced_four_distinct_anchors(monkeypatch) -> None:
+    """M-3:high 值得度不再强制「四证据锚各一」。"""
+    four_same = (
+        '{"repo_summary": "x", "questions": ['
+        + _q("architecture", "src/app.py", "为何这样分层?")
+        + ","
+        + _q("tradeoff", "src/app.py", "为何选这栈?")
+        + ","
+        + _q("architecture", "tests/test_app.py", "测试为何这样组织?")
+        + ","
+        + _q("tradeoff", "src/app.py", "何处做过取舍?")
+        + "]}"
+    )
+    _install_fake_gh_and_model(monkeypatch, four_same)
+    qs = await ig.run_investigation("项目 https://github.com/me/demo 报名页")
+    assert qs["mode"] == "repo_deep_dive" and len(qs["questions"]) == 4

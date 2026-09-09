@@ -52,9 +52,19 @@ class InvestigationState(TypedDict, total=False):
 
 
 async def route_node(state: InvestigationState) -> dict:
-    """提取仓位置并探测可读性 → 路由(#130)。"""
+    """提取仓位置并探测可读性 → 路由(#130)。
+
+    支持 M-1 多仓:调用方可预置 repo_owner/repo_name 钉住某仓(逐仓深挖);
+    未钉时回退首个匹配(extract_repo)。
+    """
     text = state["project_text"]
-    repo = extract_repo(text)
+    pinned_owner = state.get("repo_owner")
+    pinned_name = state.get("repo_name")
+    repo = (
+        (pinned_owner, pinned_name)
+        if pinned_owner and pinned_name
+        else extract_repo(text)
+    )
     if repo is None:
         return {"route": route_project(text, None)}
     client = GitHubClient(
@@ -114,10 +124,13 @@ async def fetch_node(state: InvestigationState) -> dict:
 
 
 async def generate_node(state: InvestigationState) -> dict:
-    """出题:deep_dive 四证据锚题(题数=值得度);guided 1-2 道通用引导题。
+    """出题(deep_dive, M-3 v2):repo_summary=项目基本面 + questions=模块设计取向题。
 
-    题数是硬校验(B3 评审 P1):worthiness=none 不调模型直接空集,
-    模型多给/少给都翻 error 态——值得度不被提示词文本架空。
+    - 题数=值得度(none/低/高 → 0/2/4);
+    - 设计取向问(架构分层/tradeoff/edge_case),允许纯技术栈取向题无单一文件
+      锚点(path 留空 + note 说明)——不再强制「四证据锚各一/必带仓路径」。
+    - guided 1-2 道通用引导题。题数是硬校验(B3 评审 P1):worthiness=none 不调
+      模型直接空集,模型多给/少给都翻 error 态——值得度不被提示词文本架空。
     """
     try:
         deep = state["route"] == "deep_dive"
@@ -167,23 +180,20 @@ async def generate_node(state: InvestigationState) -> dict:
             raise ValueError(f"引导题超量:{len(result.questions)}")
         paths = set(state.get("paths", []))
         paths_truncated = bool(state.get("paths_truncated"))
-        anchors: set[str] = set()
         for q in result.questions:
             if deep:
+                # M-3 设计取向重构:纯技术栈/设计哲学取向题可无单一仓内文件锚点
+                # (该模块跨多文件);此时 evidence.note 须解释为何不落单路径。
                 if not q.evidence.path:
-                    raise ValueError(
-                        f"deep_dive 题缺 evidence.path:{q.question[:30]!r}"
-                    )
-                # 树被 GitHub 截断时白名单不完整,放宽成员校验(评审 P2)
-                if not paths_truncated and q.evidence.path not in paths:
+                    if not q.evidence.note:
+                        raise ValueError("deep_dive 题空路径须有 evidence.note")
+                # 给了路径→仓内白名单校验(I/O 降级或树截断则放宽——评审 P2)
+                elif paths and not paths_truncated and q.evidence.path not in paths:
                     raise ValueError(f"evidence.path 不在仓内:{q.evidence.path!r}")
                 if q.anchor == "guided":
                     raise ValueError("deep_dive 题不得用 guided 锚")
-                anchors.add(q.anchor)
             elif q.evidence.path:
                 raise ValueError("guided 题不应带仓路径")
-        if deep and count == 4 and len(anchors) != 4:
-            raise ValueError("high 值得度应四锚各一题")
         return {"question_set": _dump(result, deep), "error": None}
     except Exception as exc:  # noqa: BLE001 — 失败进 error 态,B2 可重试
         return {"question_set": None, "error": f"{type(exc).__name__}: {exc}"}
@@ -236,18 +246,24 @@ def build_investigation_subgraph() -> Any:
 async def run_investigation(
     project_text: str,
     *,
+    repo: tuple[str, str] | None = None,
     github_base: str = "https://api.github.com",
     github_token: str = "",
 ) -> dict:
-    """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。"""
+    """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。
+
+    M-1:可钉 repo(owner, repo) 逐仓调查(多仓候选一个仓一个 envelope);
+    缺省按项目文本首个 GitHub URL。
+    """
     graph = build_investigation_subgraph()
-    final: InvestigationState = await graph.ainvoke(
-        {
-            "project_text": project_text,
-            "github_base": github_base,
-            "github_token": github_token,
-        }
-    )
+    init: InvestigationState = {
+        "project_text": project_text,
+        "github_base": github_base,
+        "github_token": github_token,
+    }
+    if repo:
+        init["repo_owner"], init["repo_name"] = repo
+    final = await graph.ainvoke(init)
     if final.get("error") or final.get("question_set") is None:
         raise RuntimeError(f"调查子图失败:{final.get('error')}")
     return final["question_set"]

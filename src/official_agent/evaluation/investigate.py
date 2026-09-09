@@ -26,19 +26,36 @@ _MIN_SUBSTANTIVE = 24
 # 值得度信号
 _SIGNAL_DIRS = ("src/", "app/", "tests/", "test/", "docs/", "server/", "client/")
 
-
-def extract_repo(text: str) -> tuple[str, str] | None:
-    """从项目文本提取 (owner, repo);无 GitHub 链接返回 None。"""
-    m = _REPO_URL.search(text or "")
-    if not m:
-        return None
-    owner, repo = m.group(1), m.group(2)
+def _strip_repo(owner: str, repo: str) -> tuple[str, str] | None:
+    """清洗单个 owner/repo:剥 .git 与尾随标点;空段返回 None。"""
     if repo.lower().endswith(".git"):
         repo = repo[:-4]
     repo = repo.rstrip(".,;:)!?}]")  # 尾随标点是书写标点,不属于仓名
     if not owner or not repo:
         return None
     return owner, repo
+
+
+def extract_repos(text: str) -> list[tuple[str, str]]:
+    """提取文本里**全部** github.com/owner/repo,保序去重。
+
+    M-1(遗留①):旧 extract_repo 只返回首个匹配,第二个仓(如候选简历里的
+    myloop-meta)被静默丢弃。调用方据此逐仓深挖。
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for m in _REPO_URL.finditer(text or ""):
+        cleaned = _strip_repo(m.group(1), m.group(2))
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+def extract_repo(text: str) -> tuple[str, str] | None:
+    """从项目文本提取首个 (owner, repo);无 GitHub 链接返回 None。"""
+    repos = extract_repos(text)
+    return repos[0] if repos else None
 
 
 def route_project(

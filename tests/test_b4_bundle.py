@@ -167,3 +167,38 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
     assert envelope["total_questions"] == len(fallback["questions"])
     assert sum(envelope["suggested_plan"]) <= 15
     assert fake_model.calls == 1  # 兜底线只调一次 LLM(技能题组)
+
+@pytest.mark.asyncio
+async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
+    """M-1:项目字段含两个 GitHub 仓 → 每个各深挖一次,不丢第二个。"""
+    fields = [
+        FieldText(
+            field_key="project",
+            title="项目经历",
+            value="前端 github.com/me/web 与后端 github.com/me/api,都做过",
+        ),
+    ]
+    called: list = []
+
+    async def _record(text, **kw):
+        called.append(kw.get("repo"))
+        return {"mode": "repo_deep_dive", "repo_summary": "", "questions": []}
+
+    async def _no_submission(github_key):
+        return None
+
+    fake_model = _FakeModel()
+    monkeypatch.setattr(bd.ig, "run_investigation", _record)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission",
+        _no_submission,
+    )
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: fake_model)
+
+    envelope = await bd.run_bundle(
+        fields, resume_id=11, cycle_id=2026, github_key="usergithub"
+    )
+    # 逐仓钉住调查,顺序=出现序
+    assert called == [("me", "web"), ("me", "api")]
+    repo_groups = [g for g in envelope["groups"] if g["group"] == "repo"]
+    assert [g["repo"] for g in repo_groups] == ["me/web", "me/api"]

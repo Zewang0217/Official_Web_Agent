@@ -20,6 +20,7 @@ from official_agent.evaluation.awards import (
     suggest_plan,
 )
 from official_agent.evaluation.graph import _extract_json
+from official_agent.evaluation.investigate import extract_repos
 from official_agent.evaluation.schema import QuestionSet
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
@@ -82,20 +83,39 @@ async def run_bundle(
     groups: list[dict[str, Any]] = []
     project_text = _project_text(fields)
 
-    # 仓线(B3)。单线失败降级为空错误组,不炸整条 bundle(B4 评审 P2)
-    try:
-        repo_envelope = await ig.run_investigation(project_text, github_token=github_token)
-        groups.append({"group": "repo", **repo_envelope})
-    except Exception as exc:  # noqa: BLE001
-        groups.append(
-            {
-                "group": "repo",
-                "mode": "error",
-                "repo_summary": "",
-                "questions": [],
-                "error": f"{type(exc).__name__}: {exc}"[:300],
-            }
-        )
+    # 仓线(B3)。M-1 多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立
+    # repo group(带 owner/repo 标识),不再只挖第一个。单线失败降级为空错误组,
+    # 不炸整条 bundle(B4 评审 P2)。
+    repo_candidates = extract_repos(project_text)
+    # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部路由到 guided/skip
+    if not repo_candidates:
+        repo_candidates = [(None, None)]  # type: ignore[list-item]
+    for owner, name in repo_candidates:
+        pinned = (owner, name) if owner and name else None
+        try:
+            repo_envelope = await ig.run_investigation(
+                project_text, repo=pinned, github_token=github_token
+            )
+            groups.append(
+                {
+                    "group": "repo",
+                    "owner": owner or "",
+                    "repo": f"{owner}/{name}" if pinned else "",
+                    **repo_envelope,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            groups.append(
+                {
+                    "group": "repo",
+                    "owner": owner or "",
+                    "repo": f"{owner}/{name}" if pinned else "",
+                    "mode": "error",
+                    "repo_summary": "",
+                    "questions": [],
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                }
+            )
 
     # 评测线(#132)
     if github_key:
