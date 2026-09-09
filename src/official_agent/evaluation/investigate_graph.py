@@ -58,7 +58,6 @@ class InvestigationState(TypedDict, total=False):
     attribution: dict
     paths: list[str]
     paths_truncated: bool
-    worthiness: str
     question_set: dict[str, Any]
     error: str | None
 
@@ -204,12 +203,10 @@ async def explore_node(state: InvestigationState) -> dict:
         dossier_text = degrade_note + "\n\n" + dossier.render()
     else:
         dossier_text = dossier.render()
-    worthiness = "high" if dossier.total_chars >= 1500 else "low"
     return {
         "dossier_text": dossier_text,
         "paths": dossier.paths,
         "paths_truncated": dossier.paths_truncated,
-        "worthiness": worthiness,
         "dossier_degraded": dossier.degraded,
         "dossier_degrade_reason": dossier.degrade_reason,
         "dossier_turns": dossier.turns_used,
@@ -269,6 +266,10 @@ async def generate_node(state: InvestigationState) -> dict:
                 raise ValueError(f"敷衍 dossier 题量越界:{group.total_questions} > 3")
             if group.total_questions > 15:
                 raise ValueError(f"题量超硬顶:{group.total_questions} > 15")
+            if group.entry is None:
+                raise ValueError("deep_dive 缺入口题(D12:入口 1)")
+            if not group.entry.evidence.path and not group.entry.evidence.note:
+                raise ValueError("deep_dive 题空路径须有 evidence.note")
             if len(group.chains) < 2:
                 raise ValueError(f"追问链不足:要求 2-4,模型给 {len(group.chains)}")
             for chain in group.chains:
@@ -277,7 +278,13 @@ async def generate_node(state: InvestigationState) -> dict:
                         f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)}"
                     )
         else:
-            # guided:entry 引导题,chains 空;题数 1-2 由 entry+reserves 承载
+            # guided:entry 引导题,chains 空;黑名单与「不带仓路径」不变量仍适用
+            guided_view = {
+                "entry": group_payload.get("entry"),
+                "chains": [],
+                "reserves": group_payload.get("reserves", []),
+            }
+            _validate_group_v2(guided_view, dossier_text, [])
             guided_payload: dict[str, Any] = {
                 "entry": group_payload.get("entry")
                 or {
@@ -314,36 +321,54 @@ async def generate_node(state: InvestigationState) -> dict:
         return {"question_set": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
+#: 对抗前提黑名单(spec §3.3:「你自述了X…但仓库却是Y…请解释矛盾」式)
+#: 注意:「自述」单独出现是合法锚定(简历锚定横切),不在黑名单
+_ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
+
+
 def _validate_group_v2(
     payload: dict[str, Any], dossier_text: str, paths: list[str]
 ) -> None:
-    """v2 后置校验(#152):对抗前提黑名单/路径白名单/链源真实性。"""
-    blacklist = ("自述", "矛盾", "撒谎", "夸大", "为什么没做到", "打脸", "解释矛盾")
+    """v2 后置校验(#152):对抗前提黑名单/路径白名单/链源真实性。
+
+    局限(诚实边界):链源真实性只对拉丁词元可判定,纯中文 theme 跳过
+    (由 grilling prompt 铁律约束);dossier 文本为扫描全集。"""
+    dossier_lowers = dossier_text.lower()
 
     def _check_question(q: str) -> None:
-        for word in blacklist:
-            if word in q and "自述" in word or ("矛盾" in q and word == "矛盾"):
+        for word in _ADVERSARIAL_WORDS:
+            if word in q:
                 raise ValueError(f"对抗前提问法({word}):{q[:40]!r}")
 
-    paths_set = {p.strip() for p in paths if p and p.strip()}
+    def _check_path(p: str, where: str) -> None:
+        if p and paths_set and p not in paths_set:
+            raise ValueError(f"evidence.path 不在仓内({where}):{p!r}")
+
+    paths_set = {x.strip() for x in paths if x and x.strip()}
     for chain in payload.get("chains", []):
         theme = str(chain.get("theme", ""))
+        texts = [theme]
         for layer in chain.get("layers", []):
-            _check_question(str(layer.get("question", "")))
-        # 链源真实性:theme 的拉丁词元至少一个出现在 dossier(依赖清单没有的不出链)
+            q = str(layer.get("question", ""))
+            _check_question(q)
+            texts.append(q)
+        # 链源真实性:链文本的拉丁词元至少一个出现在 dossier
         tokens = [
-            t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", theme)
-            if t.lower() not in {"the", "and", "for", "with"}
+            t.lower()
+            for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", " ".join(texts))
+            if t.lower() not in {"the", "and", "for", "with", "layer"}
         ]
-        if tokens and not any(t in dossier_text.lower() for t in tokens):
+        if tokens and not any(t in dossier_lowers for t in tokens):
             raise ValueError(f"链源不在 dossier:theme={theme[:40]!r}")
     for reserve in payload.get("reserves", []):
         _check_question(str(reserve.get("question", "")))
+        _check_path(
+            str((reserve.get("evidence") or {}).get("path", "")),
+            f"reserve:{reserve.get('category', '?')}",
+        )
     entry = payload.get("entry") or {}
     _check_question(str(entry.get("question", "")))
-    ev_path = str((entry.get("evidence") or {}).get("path", ""))
-    if ev_path and paths_set and ev_path not in paths_set:
-        raise ValueError(f"evidence.path 不在仓内:{ev_path!r}")
+    _check_path(str((entry.get("evidence") or {}).get("path", "")), "entry")
 
 
 def _attribution_level(level: Any) -> Any:

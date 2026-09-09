@@ -28,16 +28,18 @@ MAX_TURNS = 80
 MAX_WALL_SECONDS = 300
 
 #: 工具观察 → dossier 槽位(确定性映射;同观察逐槽全写,不做短路)
+_S = {name: name for name in SLOT_NAMES}  # 槽名单源(与 schema.CATEGORY 同步)
+
 _SLOT_BY_TOOL: dict[str, tuple[str, ...]] = {
-    "repo_meta": ("C1_背景与动机", "C2_技术选型与权衡", "C5_数字与规模"),
-    "list_files": ("C3_架构与数据流",),
-    "read_file": ("C4_实现细节拷打", "C7_边界与失败模式"),
-    "search_in_repo": ("C7_边界与失败模式", "C10_复盘与改进"),
-    "read_commits": ("C6_难点与调试",),
-    "commit_detail": ("C6_难点与调试", "C4_实现细节拷打"),
-    "search_issues": ("C8_真实性与贡献边界",),
-    "search_repos": ("C1_背景与动机",),
-    "list_user_repos": ("C1_背景与动机",),
+    "repo_meta": (_S["C1_背景与动机"], _S["C2_技术选型与权衡"], _S["C5_数字与规模"]),
+    "list_files": (_S["C3_架构与数据流"],),
+    "read_file": (_S["C4_实现细节拷打"], _S["C7_边界与失败模式"]),
+    "search_in_repo": (_S["C7_边界与失败模式"], _S["C10_复盘与改进"]),
+    "read_commits": (_S["C6_难点与调试"],),
+    "commit_detail": (_S["C6_难点与调试"], _S["C4_实现细节拷打"]),
+    "search_issues": (_S["C8_真实性与贡献边界"],),
+    "search_repos": (_S["C1_背景与动机"],),
+    "list_user_repos": (_S["C1_背景与动机"],),
 }
 # C9 变更应力不单列映射:配置/CI/扩展点类 read_file 观察落 C4/C7 后由出题段
 # 引用(spec「不必每类必有材料」);单列会令每次读码都灌 C9,稀释槽位语义。

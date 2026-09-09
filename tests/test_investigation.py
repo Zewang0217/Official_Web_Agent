@@ -40,18 +40,6 @@ def test_route_three_ways() -> None:
     assert inv.route_project(long_text, None) == "guided"  # 无仓有实质
     assert inv.route_project("太短", None) == "skip"  # 无仓无实质
     assert inv.route_project("太短", False) == "guided"  # 有仓但不可读→引导
-
-
-def test_worthiness_tiers() -> None:
-    high = inv.repo_worthiness(
-        readme_chars=800, commit_count=20, paths=[f"src/{i}.py" for i in range(40)]
-    )
-    none = inv.repo_worthiness(readme_chars=10, commit_count=1, paths=["a.py"])
-    assert high == "high" and none == "none"
-    assert inv.WORTHINESS_QUESTION_COUNT["high"] == 4
-    assert inv.WORTHINESS_QUESTION_COUNT["none"] == 0
-
-
 # ── GitHub 客户端(respx) ────────────────────────────────
 
 
@@ -310,19 +298,6 @@ def test_repo_regex_boundaries() -> None:
     assert inv.extract_repo("项目是 github.com/owner/repo.") == ("owner", "repo")
     assert inv.extract_repo("看 mygithub.com/owner/repo 这个") is None
     assert inv.extract_repo("github.com/owner/repo.git 已归档") == ("owner", "repo")
-
-
-def test_worthiness_low_tier() -> None:
-    """low 档:少量信号 → 2 题。"""
-    assert (
-        inv.repo_worthiness(
-            readme_chars=800, commit_count=5, paths=["a.py", "b.py"]
-        )
-        == "low"
-    )
-    assert inv.WORTHINESS_QUESTION_COUNT["low"] == 2
-
-
 @pytest.mark.asyncio
 async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
     """探索零材料 → guided 降级(§3.4:GitHub 不可达/探索全败,替代旧 worthiness=none)。"""
@@ -449,3 +424,68 @@ async def test_v2_categories_not_forced_uniform(monkeypatch) -> None:
     }
 
 
+
+
+# ── #152 后置校验(评审 P1:缺失的测试) ──
+
+
+def test_adversarial_blacklist_rejects_all_forms() -> None:
+    """对抗前提黑名单逐词生效(P0 回归:布尔优先级曾致 5 词死代码)。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    dossier_text = "README.md src/app.py tests/test_app.py"
+    all_paths = ["src/app.py", "README.md", "tests/test_app.py"]
+    for word in ("矛盾", "撒谎", "夸大", "打脸", "为什么没做到"):
+        bad = json.loads(_v2_payload())
+        bad["entry"]["question"] = f"你自述主导重构,和代码对不上,{word}了?"
+        with pytest.raises(ValueError, match="对抗前提"):
+            _validate_group_v2(bad, dossier_text, all_paths)
+
+
+def test_legitimate_anchoring_question_passes() -> None:
+    """简历锚定横切:合法「你自述里提到 X,为什么选它」不误拒(P0 伴随)。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = json.loads(_v2_payload())
+    payload["entry"]["question"] = "你自述里提到用 Redis,为什么选它而不是 MySQL?"
+    dossier_text = "README.md src/app.py tests/test_app.py,依赖清单含 redis 客户端"
+    _validate_group_v2(payload, dossier_text, ["src/app.py", "README.md", "tests/test_app.py"])
+
+
+def test_chain_source_not_in_dossier_rejected() -> None:
+    """链源真实性:theme/层问题引用 dossier 没有的组件 → 拒绝。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = json.loads(_v2_payload())
+    payload["chains"][0]["theme"] = "kafka 消息队列的削峰设计"
+    with pytest.raises(ValueError, match="链源不在 dossier"):
+        _validate_group_v2(
+            payload,
+            "README.md src/app.py,依赖只有 redis 与 flask",
+            ["src/app.py", "README.md"],
+        )
+
+
+def test_reserve_path_whitelist_enforced() -> None:
+    """备选题 evidence.path 白名单同样校验(P1:曾只查 entry)。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = json.loads(_v2_payload())
+    payload["reserves"][0]["evidence"]["path"] = "fabricated/不存在.py"
+    with pytest.raises(ValueError, match="不在仓内"):
+        _validate_group_v2(
+            payload,
+            "README.md src/app.py tests/test_app.py",
+            ["src/app.py", "README.md", "tests/test_app.py"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_thin_dossier_over_limit_rejected(monkeypatch) -> None:
+    """敷衍 dossier(体量 <400 字符)题量 >3 → 拒绝重试(D10)。"""
+    payload = json.loads(_v2_payload())  # 缺省组 8 题 > 3
+    _install_fake_gh_and_model(
+        monkeypatch, json.dumps(payload, ensure_ascii=False), explore_chars=50
+    )
+    with pytest.raises(RuntimeError, match="敷衍"):
+        await ig.run_investigation("项目 https://github.com/me/demo " + "说明 " * 10)
