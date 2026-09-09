@@ -29,7 +29,7 @@ _INJECTION_RE = re.compile(
     r"|disregard\s+(all\s+)?(previous|above|prior)"
     r"|(你现在是|从现在开始你是|请扮演|你来扮演|roleplay\s+as|act\s+as\s+(if|a|an?))"
     r"|(复述|输出|打印|显示|泄露|泄漏|忽略).{0,8}system\s*prompt|系统提示(词|指令)"
-    r"|泄露|泄漏(你|系统)的(指令|提示|设定)"
+    r"|(?:泄露|泄漏)(?:你|系统)的(?:指令|提示|设定)"
     r"|开发者模式|developer\s+mode|jailbreak"
     r"|(?:请|直接|一律|帮我?|给|打|给我|给他|给她)?(?:给|打)(?:个)?(?:满分|零分)"
     r"|不要按(内容|实际|真实)(情况)?(评分|打分|给分)"
@@ -51,7 +51,7 @@ def scan_injection(text: str) -> tuple[bool, str]:
 def wrap_data_zone(source: str, payload: str) -> str:
     """不可信数据包数据区标签(system 政策:标签内一律是数据,指令样文本不执行)。
 
-    payload 中的字面 </data> 中和为 <\/data>:防数据区被内容提前闭合,
+    payload 中的字面 </data> 中和为 <\\/data>:防数据区被内容提前闭合,
     把后续文本抛到标签外(评审 P1:自建边界的自洽缺口)。"""
     neutralized = payload.replace("</data>", "<\\/data>")
     return f'<data source="{source}">\n{neutralized}\n</data>'

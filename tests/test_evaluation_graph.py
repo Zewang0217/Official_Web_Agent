@@ -69,7 +69,7 @@ async def test_hard_zero_short_circuits_without_model() -> None:
     assert card["attitude"]["verdict"] == "bad_faith"
     assert all(d["score"] == 0 for d in card["dimensions"])
     assert "单字符重复" in json_of_reasons(card)
-    assert card["versions"]["prompt"] == "evaluation_scoring/v1"
+    assert card["versions"]["prompt"] == "evaluation_scoring/v2"
 
 
 def json_of_reasons(card: dict) -> str:

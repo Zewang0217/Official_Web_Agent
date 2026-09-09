@@ -292,9 +292,15 @@ async def _run_turn(
         reset_turn_trace_id(trace_token)
     if buffer_reply:
         # GRA-04 #161:无工具档整段过编造守卫后一次性输出(不再逐块打印)
+        import logging
+
         from official_agent.security.fabrication_guard import guard_empty_tools_reply
 
-        final_reply, _verdict = guard_empty_tools_reply("".join(buffered))
+        final_reply, verdict = guard_empty_tools_reply("".join(buffered))
+        if verdict != "clean":
+            logging.getLogger(__name__).warning(
+                "guard_event guard_name=%s verdict=%s", "fabrication_empty_tools", verdict
+            )
         if final_reply:
             console.print(final_reply, markup=False, highlight=False)
     console.print()

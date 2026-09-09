@@ -6,8 +6,9 @@
 ③回归用例——等通用 runner(#148)落地后另票毕业(地图 Not yet specified)。
 
 适用面:本守卫只挂 tools=[] 的轮次(unknown 档);有工具轮次的失败话术
-约束在①里。守卫轻契约(#159):guard_name=fabrication_empty_tools,
-verdict=clean|triggered;trace 字段在 #163 守卫挂载契约统一接线。
+约束在①里。守卫轻契约(#159/#163):guard_name=fabrication_empty_tools,
+verdict=clean|triggered:xxx——调用方(cli/routes 改写点)以结构化日志落
+guard_event,字段与 #163 injection_scan 同款。
 """
 
 from __future__ import annotations

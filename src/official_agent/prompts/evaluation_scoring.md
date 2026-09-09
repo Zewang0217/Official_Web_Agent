@@ -1,7 +1,7 @@
 ---
 name: evaluation-scoring
 description: B 简历初筛打分 prompt(逐维给分+依据+原文证据+态度判定;strict 结构化输出)
-version: evaluation_scoring/v1
+version: evaluation_scoring/v2
 model: strong
 ---
 
