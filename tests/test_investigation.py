@@ -489,3 +489,42 @@ async def test_thin_dossier_over_limit_rejected(monkeypatch) -> None:
     )
     with pytest.raises(RuntimeError, match="敷衍"):
         await ig.run_investigation("项目 https://github.com/me/demo " + "说明 " * 10)
+
+
+@pytest.mark.asyncio
+async def test_generation_usage_into_envelope(monkeypatch) -> None:
+    """#154:出题段单次 usage → 信封 generation_usage(D9 出题半边)。"""
+
+    class _Msg:
+        content = json.loads(_v2_payload())
+
+    class _RawUsageModel:
+        def bind_tools(self, tools: Any, **kwargs: Any):
+            return self
+
+        async def ainvoke(self, messages: list):
+            from langchain_core.messages import AIMessage
+
+            return AIMessage(
+                json.dumps(_Msg.content, ensure_ascii=False),
+                response_metadata={
+                    "token_usage": {
+                        "prompt_tokens": 900,
+                        "completion_tokens": 120,
+                        "prompt_cache_hit_tokens": 500,
+                        "prompt_cache_miss_tokens": 400,
+                    }
+                },
+            )
+
+    _install_fake_explore(monkeypatch)
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _RawUsageModel())
+
+    class _S:
+        model_strong = "test-strong"
+
+    monkeypatch.setattr(ig, "get_effective_settings", _S)
+    qs = await ig.run_investigation("项目 https://github.com/me/demo " + "做了很多事 " * 5)
+    gu = qs.get("generation_usage")
+    assert gu is not None and gu["input_tokens"] == 900
+    assert gu["cache_hit_tokens"] == 500

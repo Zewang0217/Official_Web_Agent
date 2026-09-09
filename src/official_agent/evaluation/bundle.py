@@ -239,11 +239,13 @@ async def run_bundle(
         "cache_miss_tokens": None,
     }
     for g in groups:
-        meta = (g.get("qbank_v2") or {}).get("explore_meta") or {}
-        for k in usage_total:
-            v = meta.get(k)
-            if v is not None:
-                usage_total[k] = (usage_total[k] or 0) + int(v)
+        qbank_v2 = g.get("qbank_v2") or {}
+        metas = [qbank_v2.get("explore_meta") or {}, qbank_v2.get("generation_usage") or {}]
+        for meta in metas:
+            for k in usage_total:
+                v = meta.get(k)
+                if v is not None:
+                    usage_total[k] = (usage_total[k] or 0) + int(v)
     envelope = {
         "schema_name": "evaluation_qbank/v2",
         "groups": groups,

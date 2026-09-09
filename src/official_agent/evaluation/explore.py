@@ -22,6 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from official_agent.evaluation.dossier import SLOT_NAMES, Dossier
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.security.injection_guard import guard_tool_result
+from official_agent.state.conversation import extract_usage
 
 #: 预算闸(D7)
 MAX_TURNS = 80
@@ -189,12 +190,13 @@ async def explore_repo(
                 model.ainvoke(messages), timeout=max(remaining, 1.0)
             )
             messages.append(response)
-            # D9/#154:extract_usage 统一解析(含 DeepSeek prompt_cache 命中/未命中)
-            from official_agent.state.conversation import extract_usage
-
+            # D9/#154:extract_usage 统一解析。raw token_usage 优先——
+            # DeepSeek prompt_cache_hit/miss 只在原始 usage,langchain 转换
+            # 会丢(#113 先例,评审 P0 实测 usage_metadata 恒真值短路兜底)
+            response_metadata = getattr(response, "response_metadata", None) or {}
             usage = extract_usage(
-                getattr(response, "usage_metadata", None)
-                or (getattr(response, "response_metadata", None) or {}).get("token_usage")
+                response_metadata.get("token_usage")
+                or getattr(response, "usage_metadata", None)
             )
             input_tokens += usage.get("input_tokens") or 0
             output_tokens += usage.get("output_tokens") or 0

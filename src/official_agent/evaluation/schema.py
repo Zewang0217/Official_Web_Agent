@@ -191,6 +191,17 @@ class ExploreMeta(BaseModel):
     cache_miss_tokens: int | None = None
 
 
+class UsageMeta(BaseModel):
+    """单次/聚合 LLM 用量(D9;None=未采集,fail-open)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_hit_tokens: int | None = None
+    cache_miss_tokens: int | None = None
+
+
 class QbankV2(BaseModel):
     """调查出题信封 v2(D13:evaluation_qbank/v2,直接替换不兼容)。
 
@@ -209,4 +220,5 @@ class QbankV2(BaseModel):
     degraded: bool = False
     degrade_reason: str = ""
     explore_meta: ExploreMeta = Field(default_factory=ExploreMeta)
+    generation_usage: UsageMeta | None = None  # 出题段单次调用用量(#154)
     prompt_version: str = ""

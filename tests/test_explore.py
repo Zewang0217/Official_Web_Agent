@@ -310,3 +310,57 @@ async def test_usage_tokens_accumulated_d9() -> None:
     assert dossier.output_tokens == 30
     assert dossier.cache_hit_tokens == 100
     assert dossier.cache_miss_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_deepseek_raw_token_usage_cache_captured() -> None:
+    """#154 评审 P0 回归:DeepSeek 非流式响应 cache 字段在 raw token_usage
+    (usage_metadata 无 input_token_details)——raw 优先才能采到命中/未命中。"""
+
+    class _RawModel:
+        def __init__(self):
+            self.seen: list = []
+
+        def bind_tools(self, tools: Any, **kwargs: Any):
+            return self
+
+        async def ainvoke(self, messages: list):
+            self.seen.append(list(messages))
+            if len(self.seen) == 1:
+                return AIMessage(
+                    "",
+                    tool_calls=[{"name": "repo_meta", "args": {}, "id": "c1"}],
+                    response_metadata={
+                        "token_usage": {
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 50,
+                            "prompt_cache_hit_tokens": 800,
+                            "prompt_cache_miss_tokens": 200,
+                        }
+                    },
+                )
+            return AIMessage(
+                "done",
+                response_metadata={
+                    "token_usage": {
+                        "prompt_tokens": 400,
+                        "completion_tokens": 30,
+                        "prompt_cache_hit_tokens": 350,
+                        "prompt_cache_miss_tokens": 50,
+                    }
+                },
+            )
+
+    model = _RawModel()
+    dossier = await explore_repo(
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+    )
+    assert dossier.input_tokens == 1400
+    assert dossier.cache_hit_tokens == 1150
+    assert dossier.cache_miss_tokens == 250

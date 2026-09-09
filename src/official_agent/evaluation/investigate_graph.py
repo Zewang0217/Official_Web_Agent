@@ -30,6 +30,7 @@ from official_agent.evaluation.schema import (
     ExploreMeta,
     QbankV2,
     QuestionGroupV2,
+    UsageMeta,
 )
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
@@ -254,6 +255,13 @@ async def generate_node(state: InvestigationState) -> dict:
             + instruction
         )
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])
+        # 出题段单次 usage(#154/D9):raw token_usage 优先(DeepSeek cache 字段)
+        from official_agent.state.conversation import extract_usage
+
+        gen_usage = extract_usage(
+            (getattr(resp, "response_metadata", None) or {}).get("token_usage")
+            or getattr(resp, "usage_metadata", None)
+        )
         raw = resp.content
         if isinstance(raw, list):
             raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
@@ -321,6 +329,11 @@ async def generate_node(state: InvestigationState) -> dict:
                 turns=int(state.get("dossier_turns", 0)),
                 dossier_chars=len(dossier_text),
                 **(state.get("explore_usage") or {}),
+            ),
+            generation_usage=(
+                UsageMeta(**{k: v for k, v in gen_usage.items() if v is not None})
+                if any(v is not None for v in gen_usage.values())
+                else None
             ),
             prompt_version=_prompt_version(),
         )
