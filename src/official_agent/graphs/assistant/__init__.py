@@ -1,19 +1,23 @@
 """A 模块 ReAct 单循环(GRA-04):按身份装配只读工具集 → create_agent。
 
 形态(ADR-0003):无意图分类,「意图」由模型在循环内选工具隐式表达。
-装配粗粒度三档(SEC-02 后续细化到权限码级并补安全测试):
-- admin:9 个只读工具全量
-- member:公共查询面(open_cycle/search/统计/场次容量)
-- candidate:仅 get_my_interview,且装配时绑定用户令牌——模型只见
-  cycle_id,永不接触凭证(凭证红线,GRA-01 同款纪律)
+装配须与后端 RBAC 对齐(ADR-0006「社团官网层问答助手」):不能只按粗粒度
+role 给工具,否则会把后端 V22 已从社员角色撤下(如 resume:view)的越权面
+经 query tool 原样露出。**收口后的目标装配(SEC-02 落地,本文件底部
+`_ROLE_TOOL_NAMES` 仍是旧 role 三档,是已知遗留)**:
+- admin:只读工具集全量(以本人 JWT get_as_user 调后端,后端复核)
+- member / candidate:全局(跨人)查询工具一律不装配 —— member 不再有
+  resume:view(V22 已撤),search_resumes/get_resume_detail 绝不借 svc-agent
+  代读;只装配「本人 scoped」只读(get_my_interview 等),查询绑定本人 JWT。
 - unknown:空集(无工具,纯问答;装配层是第一道闸,ADR-0005)
+
+只读通道决断(2026-09-09):本问答助手(官网对话 web 通道)**只读、不装配
+任何写工具** —— 写操作闭环是 GRA-05/M3(interrupt 需 MEM-01 checkpointer),
+不在本助手能力面内;后续亦暂不扩展写工具。
 
 静态前缀纪律(prompt cache,参考 ai-agent-book ch2):
 system prompt 与工具定义保持字节级稳定、与角色无关;身份信息作为
 **首条用户消息**注入(会话内稳定,跨会话不污染缓存键)。
-
-写工具(assign_interview 等)不装配——写操作闭环是 GRA-05/M3
-(interrupt 需 MEM-01 checkpointer),M1 验收为多工具组合查询。
 """
 
 from pathlib import Path

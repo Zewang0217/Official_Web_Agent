@@ -27,6 +27,7 @@ from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id
 from official_agent.tools.client import BackendError
+from official_agent.tools.readonly import asker_scope
 
 router = APIRouter()
 
@@ -200,23 +201,27 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
     yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
 
     try:
-        async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
-            {"messages": messages}, config=config, stream_mode=["messages", "updates"]
-        ):
-            if mode == "messages":
-                chunk, _meta = payload
-                if isinstance(chunk, AIMessageChunk) and chunk.content:
-                    yield sse({"type": "delta", "role": "assistant", "content": chunk.content})
-            elif mode == "updates":
-                for _ns, node_update in payload.items():
-                    if isinstance(node_update, dict):
-                        for m in node_update.get("messages") or []:
-                            # 工具调用状态(契约 #90:tool 事件,role=tool)
-                            if getattr(m, "tool_calls", None):
-                                for tc in m.tool_calls:
-                                    yield sse(
-                                        {"type": "tool", "role": "tool", "name": tc.get("name")}
-                                    )
+        # 只读查询以来问者本人 JWT 执行(ADR-0006「社团官网层问答助手」):
+        # 本轮内 readonly 查询经 _read 走 get_as_user,后端按本人权限判+归因;
+        # 服务账号不再代读在线数据。ContextVar 任务本地,并发会话不串租户。
+        async with asker_scope(session.user_token):
+            async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
+                {"messages": messages}, config=config, stream_mode=["messages", "updates"]
+            ):
+                if mode == "messages":
+                    chunk, _meta = payload
+                    if isinstance(chunk, AIMessageChunk) and chunk.content:
+                        yield sse({"type": "delta", "role": "assistant", "content": chunk.content})
+                elif mode == "updates":
+                    for _ns, node_update in payload.items():
+                        if isinstance(node_update, dict):
+                            for m in node_update.get("messages") or []:
+                                # 工具调用状态(契约 #90:tool 事件,role=tool)
+                                if getattr(m, "tool_calls", None):
+                                    for tc in m.tool_calls:
+                                        yield sse(
+                                            {"type": "tool", "role": "tool", "name": tc.get("name")}
+                                        )
     except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
         yield sse({"type": "error", "code": _error_code(exc), "message": str(exc)})
         return

@@ -13,12 +13,50 @@ PII 红线(#68):本层返回原文即 trace 上报原文。get_resume_detail 是
 """
 
 import asyncio
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from official_agent.tools.client import BackendClient, BackendError
 
 _client: BackendClient | None = None
 _client_lock = asyncio.Lock()
+
+# 只读查询的身份来源(ADR-0006「社团官网层问答助手」):单轮(web turn/任务)
+# 内把只读查询指向「来问者本人 JWT」。ContextVar 是 asyncio 任务/协程链本地,
+# 并发会话各自隔离,不串租户;None=无本人身份(MCP/批处理),str=本人 token。
+_ASKER_TOKEN: ContextVar[str | None] = ContextVar("readonly_asker_token", default=None)
+
+
+@asynccontextmanager
+async def asker_scope(token: str):
+    """在当前协程链(turn)**内**把只读查询身份绑定到来问者本人 JWT。
+
+    web 通道在每轮 agent 执行外包一层;token 为空即视为应为而不该发生,
+    读取侧会 fail-closed(见 _read),绝不回落服务账号代读。
+    """
+    tok = _ASKER_TOKEN.set(token)
+    try:
+        yield
+    finally:
+        _ASKER_TOKEN.reset(tok)
+
+
+async def _read(path: str, params: dict[str, Any] | None = None) -> Any:
+    """只读 GET 的统一出口:以当前协程链的 asker 身份或服务账号单例取数。
+
+    - asker token 存在 → 经 get_as_user 以本人 JWT 裸发,后端 @PreAuthorize
+      按本人判权限并归因(消除服务账号代读;web 在线问答走此路)。
+    - 作用域存在但 token 空 → fail-closed,绝不代过。
+    - 无作用域(None, MCP/批处理/测试注入)→ 走进程共享服务账号单例。
+    """
+    token = _ASKER_TOKEN.get()
+    client = await get_backend_client()
+    if token:
+        return await client.get_as_user(path, params=params, user_token=token)
+    if token is not None:
+        raise BackendError("当前查询缺少来问者身份(user_token),无法以本人权限执行")
+    return await client.get(path, params=params)
 
 
 async def get_backend_client() -> BackendClient:
@@ -42,9 +80,7 @@ async def get_open_cycle() -> dict | list:
 
     对应 GET /api/cycles/open。返回周期基本信息(注意:无 status 字段)。
     """
-    client = await get_backend_client()
-    return await client.get("/api/cycles/open")
-
+    return await _read("/api/cycles/open")
 
 async def search_resumes(
     cycle_id: int | None = None,
@@ -62,7 +98,7 @@ async def search_resumes(
     对应 GET /api/resumes/search(department 映射到查询参数 expectedDepartment)。
     示例:search_resumes(cycle_id=2, department="技术部", status="1")。
     """
-    client = await get_backend_client()
+
     params: dict[str, Any] = {"page": page, "size": size}
     if cycle_id is not None:
         params["cycleId"] = cycle_id
@@ -74,7 +110,7 @@ async def search_resumes(
         params["major"] = major
     if status is not None:
         params["status"] = status
-    data = await client.get("/api/resumes/search", params=params)
+    data = await _read("/api/resumes/search", params=params)
     # 后端分页为 Spring Page 结构:content/totalElements(2026-09-01 冒烟核实)
     if data is None:
         return {"content": [], "totalElements": 0}
@@ -89,8 +125,7 @@ async def get_resume_detail(user_id: int, cycle_id: int) -> dict:
     ⚠ 返回完整简历内容(含手机号/学号等 PII),输出会被 trace 记录——
     不要在面向候选人的回答里复述这些字段。
     """
-    client = await get_backend_client()
-    return await client.get(f"/api/resumes/admin/{user_id}/{cycle_id}")
+    return await _read(f"/api/resumes/admin/{user_id}/{cycle_id}")
 
 
 async def get_my_interview(cycle_id: int, user_token: str) -> dict | None:
@@ -113,11 +148,11 @@ async def find_available_sessions(
     对应 GET /api/interview/admin/cycles/{id}/available-sessions(后端仅支持
     deptId 过滤;date 为 YYYY-MM-DD 时在客户端过滤后返回)。
     """
-    client = await get_backend_client()
+
     params: dict[str, Any] = {}
     if dept_id is not None:
         params["deptId"] = dept_id
-    data = await client.get(
+    data = await _read(
         f"/api/interview/admin/cycles/{cycle_id}/available-sessions", params=params
     )
     if date and isinstance(data, list):
@@ -127,8 +162,7 @@ async def find_available_sessions(
 
 async def list_unassigned(cycle_id: int) -> dict | list:
     """尚未分配面试的候选人列表。对应 GET /api/interview/admin/cycles/{id}/unassigned。"""
-    client = await get_backend_client()
-    return await client.get(f"/api/interview/admin/cycles/{cycle_id}/unassigned")
+    return await _read(f"/api/interview/admin/cycles/{cycle_id}/unassigned")
 
 
 async def list_reschedule_requests(cycle_id: int, status: int | None = 0) -> dict | list:
@@ -137,11 +171,11 @@ async def list_reschedule_requests(cycle_id: int, status: int | None = 0) -> dic
     对应 GET /api/interview/reschedule/admin/list?cycleId=&status=。
     同意改期后需人工重排:用写工具 assign_interview 调剂到新场次。
     """
-    client = await get_backend_client()
+
     params: dict[str, Any] = {"cycleId": cycle_id}
     if status is not None:
         params["status"] = status
-    return await client.get("/api/interview/reschedule/admin/list", params=params)
+    return await _read("/api/interview/reschedule/admin/list", params=params)
 
 
 # 决策码语义(InterviewResultItem.decision):0 待定 / 1 通过 / 2 不通过 / 3 待调剂
@@ -157,11 +191,11 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
     返回:简历投递总数、按最终决定(decision)计数、按分配部门计数、已评价人数;
     看个人明细用 search_resumes / list_unassigned 下钻。
     """
-    client = await get_backend_client()
+
     items: list[dict] = []
     page = 1
     while True:
-        data = await client.get(
+        data = await _read(
             "/api/interview/result/list", params={"cycleId": cycle_id, "page": page, "size": 100}
         )
         batch = (data or {}).get("interviewResults", [])
@@ -186,13 +220,13 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
 
     evaluated = None
     try:
-        summary = await client.get(f"/api/interview/evaluation/cycles/{cycle_id}/summary")
+        summary = await _read(f"/api/interview/evaluation/cycles/{cycle_id}/summary")
         evaluated = len((summary or {}).get("candidates", []))
     except BackendError:
         pass  # 该周期评价表未开启时无 summary,统计不因此失败
 
     # 投递总数(含未提交草稿):search 的 totalElements;周期不存在时后端给空页
-    resumes = await client.get(
+    resumes = await _read(
         "/api/resumes/search", params={"cycleId": cycle_id, "page": 1, "size": 1}
     )
     total_resumes = (resumes or {}).get("totalElements")
