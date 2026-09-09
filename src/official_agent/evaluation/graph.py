@@ -184,6 +184,21 @@ async def llm_score(state: EvaluationState) -> dict:
                 raise ValueError(
                     f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}"
                 )
+        # #162 硬校验(#157 决议 §4):态度与分数的契约,违例翻 error 重试
+        if result.attitude.verdict == "bad_faith" and any(
+            d.score != 0 for d in result.dimensions
+        ):
+            raise ValueError("bad_faith 必须全维 0(模型给了非 0 分)")
+        if result.attitude.verdict == "perfunctory" and any(
+            d.score > 30 for d in result.dimensions
+        ):
+            raise ValueError("perfunctory 必须全维 ≤30(模型给了高分)")
+        if result.attitude.verdict == "bad_faith" and not any(
+            fk in result.attitude.reason for fk in expected
+        ):
+            raise ValueError(
+                "bad_faith reason 必须点名具体 field_key(#157 决议 §4)"
+            )
         scores = {d.field_key: d.score for d in result.dimensions}
         card_total_zero = bool(scores) and all(s == 0 for s in scores.values())
         card = {

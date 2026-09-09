@@ -69,7 +69,7 @@ async def test_hard_zero_short_circuits_without_model() -> None:
     assert card["attitude"]["verdict"] == "bad_faith"
     assert all(d["score"] == 0 for d in card["dimensions"])
     assert "单字符重复" in json_of_reasons(card)
-    assert card["versions"]["prompt"] == "evaluation_scoring/v2"
+    assert card["versions"]["prompt"] == "evaluation_scoring/v3"
 
 
 def json_of_reasons(card: dict) -> str:
@@ -202,7 +202,8 @@ async def test_all_zero_llm_card_marks_hard_zero() -> None:
         ' "evidence": "我是张三,做过两个 Web 项目。"},'
         '{"field_key": "reason", "score": 0, "rationale": "r",'
         ' "evidence": "认同社团氛围,想参与招新开发。"}],'
-        '"attitude": {"verdict": "bad_faith", "reason": "整份无实质内容"}}'
+        '"attitude": {"verdict": "bad_faith",'
+        ' "reason": "reason 维整份无实质内容,原文引述:(空白)"}}'
     )
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(payload)),
