@@ -1,6 +1,8 @@
 """B3 调查子图·仓深挖测试:路由/值得度/GitHub 客户端(respx)/子图三路径。"""
 
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -140,17 +142,62 @@ def _q(anchor: str, path: str, text: str) -> str:
     )
 
 
-_GOOD_JSON = (
-    '{"repo_summary": "社团官网,活跃", "questions": ['
-    + _q("architecture", "src/app.py", "报名页的前端状态是怎么管理的?")
-    + ","
-    + _q("claims_vs_reality", "README.md", "自述独立完成重构,仓库哪里能体现?")
-    + ","
-    + _q("edge_case", "tests/test_app.py", "表单提交并发冲突怎么处理?")
-    + ","
-    + _q("tradeoff", "src/app.py", "现在重写你会改哪个架构决定?")
-    + "]}"
-)
+def _entry_q(category: str, path: str, question: str) -> dict:
+    return {
+        "category": category,
+        "question": question,
+        "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+        "evidence": {"path": path, "note": "n"},
+        "time_minutes": 3,
+    }
+
+
+def _reserve_q(category: str, path: str, question: str) -> dict:
+    return {
+        "category": category,
+        "question": question,
+        "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+        "evidence": {"path": path, "note": "n"},
+        "time_minutes": 3,
+    }
+
+
+def _chain(category: str, theme: str, n_layers: int = 3) -> dict:
+    return {
+        "category": category,
+        "theme": theme,
+        "layers": [
+            {"question": f"L{i+1}: {theme} 的第{i+1}层怎么落地?",
+             "expected_signal": "能讲清设计取舍"}
+            for i in range(n_layers)
+        ],
+    }
+
+
+def _v2_payload(
+    *,
+    chains: list[dict] | None = None,
+    reserves: list[dict] | None = None,
+    entry: dict | None = None,
+) -> str:
+    """v2 题组 JSON(模型输出形状)。缺省=合规组:入口+2 链+2 备选。"""
+    payload = {
+        "repo_summary": "社团官网,活跃",
+        "entry": entry or _entry_q("C1_背景与动机", "src/app.py", "为什么做这个项目?"),
+        "chains": chains
+        if chains is not None
+        else [
+            _chain("C4_实现细节拷打", "src/app.py 的请求处理链"),
+            _chain("C7_边界与失败模式", "tests 目录覆盖的边界场景"),
+        ],
+        "reserves": reserves
+        if reserves is not None
+        else [
+            _reserve_q("C6_难点与调试", "README.md", "最大的难点是什么,怎么排查的?"),
+            _reserve_q("C9_变更条件", "src/app.py", "流量 ×10 哪里先坏?"),
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _install_fake_explore(monkeypatch, chars: int = 2000) -> None:
@@ -161,8 +208,8 @@ def _install_fake_explore(monkeypatch, chars: int = 2000) -> None:
     def _fake_run_explore(project_text, **kw):
         async def _impl():
             d = Dossier(attribution=kw.get("attribution", ""))
-            d.add("C1_动机定位", "# Demo\n" + "x" * chars)
-            d.add("C3_架构分层", "README.md src/app.py tests/test_app.py")
+            d.add("C1_背景与动机", "# Demo\n" + "x" * chars)
+            d.add("C3_架构与数据流", "README.md src/app.py tests/test_app.py")
             d.paths = ["README.md", "src/app.py", "tests/test_app.py"]
             d.turns_used = 2
             return d
@@ -193,10 +240,11 @@ def _install_fake_gh_and_model(monkeypatch, payload: str, explore_chars: int = 2
 
 @pytest.mark.asyncio
 async def test_deep_dive_happy_path(monkeypatch) -> None:
-    _install_fake_gh_and_model(monkeypatch, _GOOD_JSON)
+    _install_fake_gh_and_model(monkeypatch, _v2_payload())
     qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
     assert qs["mode"] == "repo_deep_dive"
-    assert qs["questions"][0]["evidence"]["path"] == "src/app.py"  # 路径真实在仓
+    assert qs["group"]["entry"]["evidence"]["path"] == "src/app.py"  # 路径真实在仓
+    assert len(qs["group"]["chains"]) == 2  # D12:追问链 2-4
 
 
 @pytest.mark.asyncio
@@ -231,7 +279,8 @@ async def test_probe_failure_degrades_to_guided(monkeypatch) -> None:
 
     qs = await ig.run_investigation("我做了 github.com/me/private 电商后端,用了 Redis")
     assert qs["mode"] == "guided"
-    assert qs["questions"][0]["evidence"]["path"] == ""
+    assert qs["group"]["entry"]["evidence"]["path"] == ""
+    assert qs["group"]["chains"] == []
 
 
 @pytest.mark.asyncio
@@ -242,16 +291,16 @@ async def test_skip_path_no_model_call(monkeypatch) -> None:
     monkeypatch.setattr(ig, "build_model", _boom)
     monkeypatch.setattr(ig, "GitHubClient", _boom)
     qs = await ig.run_investigation("   ")
-    assert qs["mode"] == "skipped" and qs["questions"] == []
+    assert qs["mode"] == "skipped"
+    assert qs["group"]["entry"] is None and qs["group"]["chains"] == []
 
 
 @pytest.mark.asyncio
 async def test_deep_dive_fabricated_path_rejected(monkeypatch) -> None:
     """证据路径不在仓内(编造)→ RuntimeError,B2 可重试。"""
-    _install_fake_gh_and_model(
-        monkeypatch,
-        _GOOD_JSON.replace('"path": "src/app.py"', '"path": "src/编造的路径.py"'),
-    )
+    payload = json.loads(_v2_payload())
+    payload["entry"]["evidence"]["path"] = "src/编造的路径.py"
+    _install_fake_gh_and_model(monkeypatch, json.dumps(payload, ensure_ascii=False))
     with pytest.raises(RuntimeError, match="不在仓内"):
         await ig.run_investigation("项目 https://github.com/me/demo")
 
@@ -312,7 +361,8 @@ async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
 
     monkeypatch.setattr(ig, "get_effective_settings", _S)
     qs = await ig.run_investigation("项目 https://github.com/me/bare 空仓")
-    assert qs["mode"] == "guided" and len(qs["questions"]) == 1
+    assert qs["mode"] == "guided"
+    assert qs["group"]["entry"] is not None and qs["group"]["chains"] == []
 
 
 @pytest.mark.asyncio
@@ -354,80 +404,48 @@ async def test_explore_midway_failure_degrades_to_guided(monkeypatch) -> None:
 
     qs = await ig.run_investigation("我做了 github.com/me/demo 官网重构,React 技术栈")
     assert qs["mode"] == "guided"
-    assert qs["questions"][0]["evidence"]["path"] == ""
+    assert qs["group"]["entry"]["evidence"]["path"] == ""
 
 
 @pytest.mark.asyncio
-async def test_count_mismatch_rejected(monkeypatch) -> None:
-    """B3 评审 P1:题数不符硬校验——high 档必须恰好 4 题。"""
-    _install_fake_gh_and_model(monkeypatch, _GOOD_JSON.replace("time_minutes\": 3}]}",
-                                                               "time_minutes\": 3}]}"))
-    # _GOOD_JSON 恰好 4 题 → 通过;只给 1 题的旧 payload → 拒
-    one_q = (
-        '{"repo_summary": "x", "questions": ['
-        + _q("architecture", "src/app.py", "架构?")
-        + "]}"
-    )
-    _install_fake_gh_and_model(monkeypatch, one_q)
-    with pytest.raises(RuntimeError, match="题数不符"):
-        await ig.run_investigation("项目 https://github.com/me/demo 报名页")
+async def test_chain_count_below_minimum_rejected(monkeypatch) -> None:
+    """追问链 <2 → 结构校验拒绝,B2 可重试(D12)。"""
+    payload = json.loads(_v2_payload())
+    payload["chains"] = payload["chains"][:1]
+    _install_fake_gh_and_model(monkeypatch, json.dumps(payload, ensure_ascii=False))
+    with pytest.raises(RuntimeError, match="追问链不足"):
+        await ig.run_investigation("项目 https://github.com/me/demo")
 
-@pytest.mark.asyncio
+
 async def test_deep_dive_allow_empty_path_with_note(monkeypatch) -> None:
-    """M-3:纯技术栈/设计哲学取向题可无单一仓内文件锚点(path 空 + note)。
-
-    旧版(必带仓路径)会把这类合法问题当失败;v2 设计取向问放宽。
-    """
-    payload = (
-        '{"repo_summary": "这个项目是什么", "questions": ['
-        + _q("tradeoff", "", "为什么选这个技术栈?")
-        + ","
-        + _q("architecture", "", "为什么这样分层?")
-        + ","
-        + _q("tradeoff", "", "放弃过什么替代方案?")
-        + ","
-        + _q("edge_case", "", "规模上升时怎么撑住?")
-        + "]}"
-    )
-    _install_fake_gh_and_model(monkeypatch, payload)
-    qs = await ig.run_investigation("项目 https://github.com/me/demo 报名页")
-    assert qs["questions"][0]["evidence"]["path"] == ""
-    # 空路径但 note 非空才合法(提示词要求 note 解释为何不落单路径)
-    assert qs["questions"][0]["evidence"]["note"]  # note 默认 "n"(见 _q)
-
-
-@pytest.mark.asyncio
-async def test_deep_dive_not_forced_four_distinct_anchors(monkeypatch) -> None:
-    """M-3:high 值得度不再强制「四证据锚各一」。"""
-    four_same = (
-        '{"repo_summary": "x", "questions": ['
-        + _q("architecture", "src/app.py", "为何这样分层?")
-        + ","
-        + _q("tradeoff", "src/app.py", "为何选这栈?")
-        + ","
-        + _q("architecture", "tests/test_app.py", "测试为何这样组织?")
-        + ","
-        + _q("tradeoff", "src/app.py", "何处做过取舍?")
-        + "]}"
-    )
-    _install_fake_gh_and_model(monkeypatch, four_same)
-    qs = await ig.run_investigation("项目 https://github.com/me/demo 报名页")
-    assert qs["mode"] == "repo_deep_dive" and len(qs["questions"]) == 4
-
-
-@pytest.mark.asyncio
-async def test_worthiness_low_yields_two_questions(monkeypatch) -> None:
-    """#151 评审 P2:worthiness low 分支(dossier < 1500 字符)→ deep_dive 2 题。"""
-    _install_fake_explore(monkeypatch, chars=200)  # 低体量 → low → 2 题
-
-    two_q = (
-        '{"repo_summary": "社团官网", "questions": ['
-        + _q("architecture", "src/app.py", "报名页的前端状态是怎么管理的?")
-        + ","
-        + _q("tradeoff", "README.md", "现在重写你会改哪个架构决定?")
-        + "]}"
-    )
-    _install_fake_gh_and_model(monkeypatch, two_q, explore_chars=200)
-    qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
+    """纯取向题(无单一文件锚点)允许空路径,note 必填(评审 P2)。"""
+    entry = _entry_q("C1_背景与动机", "", "为什么选择这个方向?")
+    entry["evidence"]["note"] = "纯取向题,跨多文件"
+    payload = json.loads(_v2_payload(entry=entry))
+    _install_fake_gh_and_model(monkeypatch, json.dumps(payload, ensure_ascii=False))
+    qs = await ig.run_investigation("项目 https://github.com/me/demo " + "做了很多事 " * 5)
     assert qs["mode"] == "repo_deep_dive"
-    assert len(qs["questions"]) == 2
+    assert qs["group"]["entry"]["evidence"]["path"] == ""  # 空路径+note 放行
+
+
+@pytest.mark.asyncio
+async def test_v2_categories_not_forced_uniform(monkeypatch) -> None:
+    """v2:链条类别自由组合(十类 taxonomy),不要求均匀覆盖。"""
+    chains = [
+        _chain("C2_技术选型与权衡", "src/app.py 依赖清单的选型权衡"),
+        _chain("C6_难点与调试", "tests/test_app.py 覆盖的边界场景"),
+        _chain("C5_数字与规模", "README.md 声明的规模数字"),
+    ]
+    reserves = [_reserve_q("C10_复盘与改进", "README.md", "重做会改什么?")]
+    payload = json.loads(_v2_payload(chains=chains, reserves=reserves))
+    _install_fake_gh_and_model(monkeypatch, json.dumps(payload, ensure_ascii=False))
+    qs = await ig.run_investigation("项目 https://github.com/me/demo " + "做了很多事 " * 5)
+    assert qs["mode"] == "repo_deep_dive"
+    cats = {c["category"] for c in qs["group"]["chains"]}
+    assert cats == {
+        "C2_技术选型与权衡",
+        "C6_难点与调试",
+        "C5_数字与规模",
+    }
+
+

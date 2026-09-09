@@ -95,3 +95,114 @@ class QuestionSet(BaseModel):
     questions: list[InterviewQuestion] = Field(default_factory=list, max_length=6)
     mode: Literal["repo_deep_dive", "guided", "skipped"] | None = None
     prompt_version: str = ""
+
+
+# ── 题组 schema v2(#152;D12/D13 直接替换,不兼容旧 questions 形状) ──
+
+CATEGORY = Literal[
+    "C1_背景与动机",
+    "C2_技术选型与权衡",
+    "C3_架构与数据流",
+    "C4_实现细节拷打",
+    "C5_数字与规模",
+    "C6_难点与调试",
+    "C7_边界与失败模式",
+    "C8_真实性与贡献边界",
+    "C9_变更条件",
+    "C10_复盘与改进",
+]
+
+ATTRIBUTION_LEVEL = Literal[
+    "trusted-own", "trusted-contribution", "claimed", "unverified", "none"
+]
+
+
+class ChainLayer(BaseModel):
+    """追问链的一层:问题 + expected_signal(答到什么算过;层间依赖)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1)
+    expected_signal: str = Field(min_length=1)
+
+
+class QuestionChain(BaseModel):
+    """追问链:层层依赖的连环问(下一问以上一问的回答为前提,D12)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: CATEGORY
+    theme: str = Field(min_length=1, description="链主题,须指明源自哪条 dossier 证据")
+    layers: list[ChainLayer] = Field(min_length=3, max_length=5)
+
+
+class EntryQuestion(BaseModel):
+    """入口题:题组 opener(通常 C1/C3,热身+定基调)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: CATEGORY
+    question: str = Field(min_length=1)
+    answer_reference: AnswerReference
+    evidence: QuestionEvidence
+    time_minutes: int = Field(default=3, ge=2, le=5)
+
+
+class ReserveQuestion(BaseModel):
+    """备选题:面试官按候选人回答灵活取用,不强制走完。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: CATEGORY
+    question: str = Field(min_length=1)
+    answer_reference: AnswerReference
+    evidence: QuestionEvidence
+    time_minutes: int = Field(default=3, ge=2, le=5)
+
+
+class QuestionGroupV2(BaseModel):
+    """一个仓的题组:入口 1 + 追问链 2-4 + 备选 2-3(D12);guided 模式 chains/reserves 可空。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entry: EntryQuestion | None = None
+    chains: list[QuestionChain] = Field(default_factory=list, max_length=4)
+    reserves: list[ReserveQuestion] = Field(default_factory=list, max_length=3)
+
+    @property
+    def total_questions(self) -> int:
+        return (1 if self.entry else 0) + sum(len(c.layers) for c in self.chains) + len(
+            self.reserves
+        )
+
+
+class ExploreMeta(BaseModel):
+    """探索段元信息(可观测/可展示;D9 用量管道接 M6)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turns: int = 0
+    dossier_chars: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+class QbankV2(BaseModel):
+    """调查出题信封 v2(D13:evaluation_qbank/v2,直接替换不兼容)。
+
+    attribution/degraded 是信封一等概念(ADR-0008:unverified 绝不出仓题;
+    D7:预算触顶 degraded 出题)。mode/guide 沿用旧语义:guided=仓库材料
+    缺失的通用引导组(此时 entry 可以是引导题,chains 空)。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_name: Literal["evaluation_qbank/v2"] = "evaluation_qbank/v2"
+    repo_summary: str = ""
+    group: QuestionGroupV2
+    mode: Literal["repo_deep_dive", "guided", "skipped"] | None = None
+    attribution: ATTRIBUTION_LEVEL = "none"
+    degraded: bool = False
+    degrade_reason: str = ""
+    explore_meta: ExploreMeta = Field(default_factory=ExploreMeta)
+    prompt_version: str = ""

@@ -114,8 +114,8 @@ async def test_tool_roundtrip_writes_slots_and_paths() -> None:
     )
     assert dossier.paths == ["README.md", "src/app.py"]  # list_files 结构化捕获
     assert "read_file:src/app.py" in client.calls
-    assert dossier.slots["C3_架构分层"]  # 观察进槽
-    assert dossier.slots["C4_核心实现"]
+    assert dossier.slots["C3_架构与数据流"]  # 观察进槽
+    assert dossier.slots["C4_实现细节拷打"]
     assert dossier.turns_used == 4  # 2 次 LLM + 2 次工具(D7 累计)
     assert not dossier.degraded
     assert dossier.attribution == "trusted-own"
@@ -185,7 +185,7 @@ async def test_github_unavailable_becomes_observation_not_crash() -> None:
         client=_DeadClient(), model=model,  # type: ignore[arg-type]
     )
     assert not dossier.degraded  # 单工具失败是观察,不是任务失败
-    assert "工具不可用" in dossier.slots["C1_动机定位"] or dossier.slots["C1_动机定位"] == ""
+    assert "工具不可用" in dossier.slots["C1_背景与动机"] or dossier.slots["C1_背景与动机"] == ""
 
 
 @pytest.mark.asyncio

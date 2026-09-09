@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage
@@ -23,12 +25,12 @@ from official_agent.evaluation.attribution import (
 from official_agent.evaluation.explore import run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
-from official_agent.evaluation.investigate import (
-    WORTHINESS_QUESTION_COUNT,
-    extract_repo,
-    route_project,
+from official_agent.evaluation.investigate import extract_repo, route_project
+from official_agent.evaluation.schema import (
+    ExploreMeta,
+    QbankV2,
+    QuestionGroupV2,
 )
-from official_agent.evaluation.schema import QuestionSet
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 
@@ -50,6 +52,9 @@ class InvestigationState(TypedDict, total=False):
     repo_name: str
     default_branch: str
     dossier_text: str
+    dossier_degraded: bool
+    dossier_degrade_reason: str
+    dossier_turns: int
     attribution: dict
     paths: list[str]
     paths_truncated: bool
@@ -189,6 +194,9 @@ async def explore_node(state: InvestigationState) -> dict:
             "dossier_text": (
                 f"探索段未取得材料({dossier.degrade_reason or '无观察'}),降级通用引导题"
             ),
+            "dossier_degraded": True,
+            "dossier_degrade_reason": dossier.degrade_reason,
+            "dossier_turns": dossier.turns_used,
         }
     if dossier.degraded:
         # 预算触顶:用已有材料出题(D7),降级标记进材料头,题面可感知
@@ -202,95 +210,153 @@ async def explore_node(state: InvestigationState) -> dict:
         "paths": dossier.paths,
         "paths_truncated": dossier.paths_truncated,
         "worthiness": worthiness,
+        "dossier_degraded": dossier.degraded,
+        "dossier_degrade_reason": dossier.degrade_reason,
+        "dossier_turns": dossier.turns_used,
         "error": None,
     }
 
 
 async def generate_node(state: InvestigationState) -> dict:
-    """出题(deep_dive, M-3 v2):repo_summary=项目基本面 + questions=模块设计取向题。
+    """出题段(B-AG4 #152):dossier → 题组 v2(单次结构化调用,spec §3.3)。
 
-    - 题数=值得度(none/低/高 → 0/2/4);
-    - 设计取向问(架构分层/tradeoff/edge_case),允许纯技术栈取向题无单一文件
-      锚点(path 留空 + note 说明)——不再强制「四证据锚各一/必带仓路径」。
-    - guided 1-2 道通用引导题。题数是硬校验(B3 评审 P1):worthiness=none 不调
-      模型直接空集,模型多给/少给都翻 error 态——值得度不被提示词文本架空。
+    - 模型只出题组 JSON;探索元信息由代码注入(explore state),不进模型面。
+    - 后置校验:题量硬顶 15 / 敷衍 dossier ≤3 / 路径白名单(dossier 出现过的
+      路径)/ 对抗前提黑名单 / 链 theme 源自 dossier。违规进 error 态,B2 重试。
+    - guided:1 道通用引导题(entry 形状,chains 空)。
     """
     try:
         deep = state["route"] == "deep_dive"
-        if deep:
-            count = WORTHINESS_QUESTION_COUNT.get(state.get("worthiness", "low"), 2)
-            if count == 0:
-                return {"question_set": _dump(QuestionSet(), deep), "error": None}
-        else:
-            count = 2
+        dossier_text = state.get("dossier_text", "")
+        thin = len(dossier_text.strip()) < 400  # 敷衍 dossier(D10:1-2 题合法)
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
-        brief = (
-            state.get("dossier_text", "")
-            if deep
-            else (
-                state.get("dossier_text", "")
-                or "探索未取得材料;仅依据候选人自述出通用项目引导题"
+        instruction = (
+            f"材料体量={'贫乏' if thin else '充足'}。"
+            + (
+                "贫乏材料:只出入口题(+至多 2 备选),chains 留空数组,总题数 ≤3。"
+                if thin
+                else "chains 出 2-4 条(每链 3-5 层),备选 2-3,总题数 ≤15。"
             )
+            + "\n只输出符合上述 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
         )
         prompt_text = (
             load_prompt(PROMPT_FILE)
             + "\n\n---\n\n候选人自述:\n"
             + state["project_text"]
-            + "\n\n仓库材料:\n"
-            + brief
-            + f"\n\n必须恰好出 {count} 道题,多一题少一题都不合格。"
-            + (
-                "每题 evidence.path 必须是上面文件结构里真实存在的路径。"
-                if deep
-                else (
-                    "仓库不可读:每题 evidence.path 留空字符串,"
-                    "evidence.note 写「仓不可读,通用引导」。"
-                )
-            )
-            + "\n只输出符合 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
+            + "\n\ndossier 材料:\n"
+            + dossier_text
+            + "\n\n"
+            + instruction
         )
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])
         raw = resp.content
         if isinstance(raw, list):
             raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
         content = raw if isinstance(raw, str) else str(raw)
-        result = QuestionSet.model_validate_json(_extract_json(content))
-        # strict 后置校验(P1 同款):题数/锚/路径三重一致性
-        if deep and len(result.questions) != count:
-            raise ValueError(f"题数不符:要求 {count},模型给 {len(result.questions)}")
-        if not deep and len(result.questions) > 2:
-            raise ValueError(f"引导题超量:{len(result.questions)}")
-        paths = set(state.get("paths", []))
-        paths_truncated = bool(state.get("paths_truncated"))
-        for q in result.questions:
-            if deep:
-                # M-3 设计取向重构:纯技术栈/设计哲学取向题可无单一仓内文件锚点
-                # (该模块跨多文件);此时 evidence.note 须解释为何不落单路径。
-                if not q.evidence.path:
-                    if not q.evidence.note:
-                        raise ValueError("deep_dive 题空路径须有 evidence.note")
-                # 给了路径→仓内白名单校验(I/O 降级或树截断则放宽——评审 P2)
-                elif paths and not paths_truncated and q.evidence.path not in paths:
-                    raise ValueError(f"evidence.path 不在仓内:{q.evidence.path!r}")
-                if q.anchor == "guided":
-                    raise ValueError("deep_dive 题不得用 guided 锚")
-            elif q.evidence.path:
-                raise ValueError("guided 题不应带仓路径")
-        return {"question_set": _dump(result, deep), "error": None}
+        group_payload: dict[str, Any] = json.loads(_extract_json(content))
+        repo_summary = str(group_payload.get("repo_summary", ""))
+
+        deep = bool(deep)
+        if deep:
+            _validate_group_v2(
+                group_payload, dossier_text, list(state.get("paths", []))
+            )
+            group = QuestionGroupV2.model_validate(
+                {k: group_payload[k] for k in ("entry", "chains", "reserves") if k in group_payload}
+            )
+            if thin and group.total_questions > 3:
+                raise ValueError(f"敷衍 dossier 题量越界:{group.total_questions} > 3")
+            if group.total_questions > 15:
+                raise ValueError(f"题量超硬顶:{group.total_questions} > 15")
+            if len(group.chains) < 2:
+                raise ValueError(f"追问链不足:要求 2-4,模型给 {len(group.chains)}")
+            for chain in group.chains:
+                if not 3 <= len(chain.layers) <= 5:
+                    raise ValueError(
+                        f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)}"
+                    )
+        else:
+            # guided:entry 引导题,chains 空;题数 1-2 由 entry+reserves 承载
+            guided_payload: dict[str, Any] = {
+                "entry": group_payload.get("entry")
+                or {
+                    "category": "C1_背景与动机",
+                    "question": "请讲讲这个项目:你负责哪部分?最大的收获是什么?",
+                    "answer_reference": {
+                        "strong": "讲清职责与收获",
+                        "acceptable": "讲清职责",
+                        "weak": "含糊其辞",
+                    },
+                    "evidence": {"path": "", "note": "仓不可读,通用引导"},
+                    "time_minutes": 3,
+                },
+                "chains": [],
+                "reserves": [],
+            }
+            group = QuestionGroupV2.model_validate(guided_payload)
+
+        envelope = QbankV2(
+            repo_summary=repo_summary,
+            group=group,
+            mode="repo_deep_dive" if deep else "guided",
+            attribution=_attribution_level((state.get("attribution") or {}).get("level")),
+            degraded=bool(state.get("dossier_degraded")),
+            degrade_reason=str(state.get("dossier_degrade_reason", "")),
+            explore_meta=ExploreMeta(
+                turns=int(state.get("dossier_turns", 0)),
+                dossier_chars=len(dossier_text),
+            ),
+            prompt_version=_prompt_version(),
+        )
+        return {"question_set": envelope.model_dump(), "error": None}
     except Exception as exc:  # noqa: BLE001 — 失败进 error 态,B2 可重试
         return {"question_set": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _dump(result: QuestionSet, deep: bool) -> dict[str, Any]:
-    result.mode = "repo_deep_dive" if deep else "guided"
-    result.prompt_version = _prompt_version()
-    return result.model_dump()
+def _validate_group_v2(
+    payload: dict[str, Any], dossier_text: str, paths: list[str]
+) -> None:
+    """v2 后置校验(#152):对抗前提黑名单/路径白名单/链源真实性。"""
+    blacklist = ("自述", "矛盾", "撒谎", "夸大", "为什么没做到", "打脸", "解释矛盾")
+
+    def _check_question(q: str) -> None:
+        for word in blacklist:
+            if word in q and "自述" in word or ("矛盾" in q and word == "矛盾"):
+                raise ValueError(f"对抗前提问法({word}):{q[:40]!r}")
+
+    paths_set = {p.strip() for p in paths if p and p.strip()}
+    for chain in payload.get("chains", []):
+        theme = str(chain.get("theme", ""))
+        for layer in chain.get("layers", []):
+            _check_question(str(layer.get("question", "")))
+        # 链源真实性:theme 的拉丁词元至少一个出现在 dossier(依赖清单没有的不出链)
+        tokens = [
+            t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", theme)
+            if t.lower() not in {"the", "and", "for", "with"}
+        ]
+        if tokens and not any(t in dossier_text.lower() for t in tokens):
+            raise ValueError(f"链源不在 dossier:theme={theme[:40]!r}")
+    for reserve in payload.get("reserves", []):
+        _check_question(str(reserve.get("question", "")))
+    entry = payload.get("entry") or {}
+    _check_question(str(entry.get("question", "")))
+    ev_path = str((entry.get("evidence") or {}).get("path", ""))
+    if ev_path and paths_set and ev_path not in paths_set:
+        raise ValueError(f"evidence.path 不在仓内:{ev_path!r}")
+
+
+def _attribution_level(level: Any) -> Any:
+    """state 归属级别 → schema Literal(未知名回退 none,防模型/上游噪音)。"""
+    allowed = {"trusted-own", "trusted-contribution", "claimed", "unverified", "none"}
+    return level if level in allowed else "none"
 
 
 async def skip_node(state: InvestigationState) -> dict:
-    """skip:此维不出题(空集合法,#130)。"""
-    envelope = QuestionSet(mode="skipped", prompt_version=_prompt_version())
+    """skip:此维不出题(空集合法,#130);信封 v2 形状。"""
+    envelope = QbankV2(
+        mode="skipped", group=QuestionGroupV2(), prompt_version=_prompt_version()
+    )
     return {"question_set": envelope.model_dump(), "error": None}
 
 

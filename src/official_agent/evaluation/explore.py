@@ -29,15 +29,15 @@ MAX_WALL_SECONDS = 300
 
 #: 工具观察 → dossier 槽位(确定性映射;同观察逐槽全写,不做短路)
 _SLOT_BY_TOOL: dict[str, tuple[str, ...]] = {
-    "repo_meta": ("C1_动机定位", "C2_技术选型", "C5_规模数字"),
-    "list_files": ("C3_架构分层",),
-    "read_file": ("C4_核心实现", "C7_边界处理"),
-    "search_in_repo": ("C7_边界处理", "C10_路线痕迹"),
-    "read_commits": ("C6_提交叙事",),
-    "commit_detail": ("C6_提交叙事", "C4_核心实现"),
-    "search_issues": ("C8_协作贡献",),
-    "search_repos": ("C1_动机定位",),
-    "list_user_repos": ("C1_动机定位",),
+    "repo_meta": ("C1_背景与动机", "C2_技术选型与权衡", "C5_数字与规模"),
+    "list_files": ("C3_架构与数据流",),
+    "read_file": ("C4_实现细节拷打", "C7_边界与失败模式"),
+    "search_in_repo": ("C7_边界与失败模式", "C10_复盘与改进"),
+    "read_commits": ("C6_难点与调试",),
+    "commit_detail": ("C6_难点与调试", "C4_实现细节拷打"),
+    "search_issues": ("C8_真实性与贡献边界",),
+    "search_repos": ("C1_背景与动机",),
+    "list_user_repos": ("C1_背景与动机",),
 }
 # C9 变更应力不单列映射:配置/CI/扩展点类 read_file 观察落 C4/C7 后由出题段
 # 引用(spec「不必每类必有材料」);单列会令每次读码都灌 C9,稀释槽位语义。

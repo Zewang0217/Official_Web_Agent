@@ -10,22 +10,15 @@ dossier_capped;四闸的另外两闸(轮数/墙钟)由 explore 循环持有。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import get_args
+
+from official_agent.evaluation.schema import CATEGORY
 
 _MAX_DOSSIER_CHARS = 40_000  # D7:dossier 总量上限
 
-#: 十类取材槽(spec §4 题类同源):槽位即题目素材面
-SLOT_NAMES: tuple[str, ...] = (
-    "C1_动机定位",  # README 定位段/项目缘起
-    "C2_技术选型",  # 依赖清单/框架痕迹
-    "C3_架构分层",  # 顶层目录/模块划分
-    "C4_核心实现",  # 核心模块源码摘录
-    "C5_规模数字",  # stars/代码量级/测试规模
-    "C6_提交叙事",  # commit message/修复轨迹
-    "C7_边界处理",  # 异常/重试/校验痕迹
-    "C8_协作贡献",  # PR/issue 参与证据
-    "C9_变更应力",  # 配置面/扩展点
-    "C10_路线痕迹",  # TODO/Roadmap/未完成
-)
+#: 十类取材槽 = 十类题类(SPEC §4),单源自 schema.CATEGORY——真机实测:
+#: 槽名与题类名漂移会让模型把槽名当 category 填,信封校验直接拒
+SLOT_NAMES: tuple[str, ...] = tuple(get_args(CATEGORY))
 
 
 @dataclass
