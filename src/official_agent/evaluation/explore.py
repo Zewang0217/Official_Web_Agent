@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from official_agent.evaluation.dossier import SLOT_NAMES, Dossier
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
+from official_agent.security.injection_guard import guard_tool_result
 
 #: 预算闸(D7)
 MAX_TURNS = 80
@@ -226,8 +227,6 @@ async def explore_repo(
                 # 中间不得插入其他角色消息(真机 400 实测)。
                 # #163:模型面的工具返回过注入守卫(数据区标签+扫描);dossier
                 # 仍存原始证据(出题材料不被标注污染)。
-                from official_agent.security.injection_guard import guard_tool_result
-
                 guarded, _trace = guard_tool_result(tool_name, observation[:2000] or "(空结果)")
                 messages.append(
                     ToolMessage(

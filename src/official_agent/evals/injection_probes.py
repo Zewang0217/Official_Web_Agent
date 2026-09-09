@@ -46,7 +46,8 @@ async def run_suite(
                 CaseResult(
                     id=cid,
                     passed=True,
-                    detail="model 段待 judge runner(#155 同批)——本批不计分",
+                    skipped=True,  # 不计 pass_rate 分母
+                    detail="model 段待 judge runner(#155 同批)",
                 )
             )
             continue
@@ -63,7 +64,7 @@ async def run_suite(
         )
         results.append(CaseResult(id=cid, passed=passed, detail=detail))
 
-    failures = [c for c in results if not c.passed]
+    failures = [c for c in results if not c.passed and not c.skipped]
     return SuiteResult(
         name=path.stem,
         kind="injection_probes",

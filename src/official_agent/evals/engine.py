@@ -27,6 +27,7 @@ class CaseResult:
     id: str
     passed: bool
     detail: str = ""
+    skipped: bool = False  # 显式 SKIP(待依赖落地):不计 pass_rate 分母
 
 
 @dataclass(slots=True)
@@ -43,9 +44,10 @@ class SuiteResult:
 
     @property
     def pass_rate(self) -> float:
-        if not self.cases:
+        scored = [c for c in self.cases if not c.skipped]
+        if not scored:
             return 1.0 if self.status == "PASS" else 0.0
-        return sum(1 for c in self.cases if c.passed) / len(self.cases)
+        return sum(1 for c in scored if c.passed) / len(scored)
 
 
 #: executor 签名:path → (distribution 透传,分布模式只看不设门) → 结果

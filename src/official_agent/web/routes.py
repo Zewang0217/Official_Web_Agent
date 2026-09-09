@@ -427,6 +427,11 @@ async def _stream_turn(
 
             final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
             if verdict != "clean":
+                logging.getLogger(__name__).warning(
+                    "guard_event guard_name=%s verdict=%s tool=<(empty)>",
+                    "fabrication_empty_tools",
+                    verdict,
+                )
                 reply_chunks = [final_reply]
                 await _rewrite_last_ai_message(session.agent, config, final_reply)
             if final_reply:

@@ -102,9 +102,7 @@ def test_assemble_tools_wraps_every_tool() -> None:
         tools = assemble_tools(_identity(role))
         assert tools, role
         for tool in tools:
-            assert getattr(tool, "__module__", "").endswith("injection_guard") or getattr(
-                tool, "__name__", ""
-            ).startswith("guarded") or True  # 包装器闭包名不敏感,行为断言如下
+            assert hasattr(tool, "__wrapped__"), f"{tool.__name__} 未过守卫包裹"
     # 行为断言:candidate 档 get_open_cycle 输出带数据区标签
     import asyncio
 
