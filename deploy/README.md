@@ -1,0 +1,91 @@
+# 部署运行手册(M6 #116)
+
+两种环境,同一套镜像/配置语法:本地整栈联调(`docker-compose.local.yml`)与
+Agent 生产两件套(`docker-compose.prod.yml`)。决策依据:#100/#104
+(独立容器、uv 构建、共享 agent PG、nginx SSE 反代、单 worker、日志卷、限流只预留)。
+
+## 本地整栈联调
+
+```bash
+# 0) 前置一次性
+cd ../Official_Web_Backend && mvn -q package -DskipTests     # Backend jar(容器挂载运行,无需 build 镜像)
+cd ../Official_Web_Frontend && npx craco build               # 静态产物(build-admin/build-user)
+
+# 1) 一键起全栈(agent + backend + 管理面板 + mysql/redis/rabbitmq/agent-pg)
+cd deploy && docker compose -f docker-compose.local.yml up -d --build
+
+# 2) 验证
+curl -s http://127.0.0.1:8001/health                          # agent liveness
+docker compose -f docker-compose.local.yml logs backend | grep V37   # agent:monitor 权限种子
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/      # 管理面板 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/conversations
+# ↑ 401 = nginx→backend→agent 链路通(未带 token 被 Backend JWT 过滤器拦,预期)
+
+# 3) 浏览器验收(#115 AC):http://localhost:3000 管理员登录 → 运营/用量/配置
+#    造对话数据:用户站(build-user 同模式部署或 dev server)+ 浮窗聊(CLI 不落行)
+```
+
+注意:
+- 与 Backend 仓库自带 compose **二选一**(共用 `volumes/mysql_data`,同时跑会坏卷)。
+- **重建 build-admin/build-user 后必须重建 web 容器**:`rm -rf` 换了目录 inode,
+  运行中容器的绑定挂载指向旧 inode → nginx 403。修复:
+  `docker compose -f deploy/docker-compose.local.yml up -d --force-recreate admin-web user-web`
+- Agent 密钥经 `env_file: ../.env` 注入,不进镜像(SEC-01)。
+- 本地栈不起 langfuse(fail-open);要观测另起 `docker compose -f ../deploy/langfuse/docker-compose.yml up -d`。
+
+## 生产上线(Agent 两件套;Backend/前端/nginx 均为既有设施,不动)
+
+```bash
+# 1) 镜像:由 CI 自动构建推送(.github/workflows/docker-push.yml)——
+#    main 推送即出镜像 + 自动部署 Node A,正常无需手工构建。
+#    必须走 CI 的原因:Node A 拉不到 ghcr.io(builder 基础镜像在那儿,实测卡
+#    1394 秒),pypi.org 亦超时;开发机反之连不上 auth.docker.io。
+#    应急手工发布(CI 不可用时,开发机 arm64 → 服务器 amd64):
+#      docker pull --platform linux/amd64 docker.m.daocloud.io/library/python:3.12-slim-bookworm
+#      docker tag docker.m.daocloud.io/library/python:3.12-slim-bookworm python:3.12-slim-bookworm
+#      docker buildx build --platform linux/amd64 -t boyuanclub/official-agent:latest --load .
+#      docker save boyuanclub/official-agent:latest | gzip -1 | ssh <node-a> "gunzip | docker load"
+# 2) 服务器:克隆 Agent 仓库到 deploy 目录,cp .env.prod.example .env.prod 填真实值
+#    (BACKEND_BASE_URL / AGENT_PG_PASSWORD / LLM key;gitignore,永不进仓库)
+# 3) cd deploy && docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+#    (--env-file 必须带:compose 的变量插值只默认读 .env,不读 .env.prod;
+#     漏了会报 "required variable AGENT_PG_PASSWORD is missing a value"。
+#     compose 里的 env_file: 只负责注入容器,不参与插值 —— 两回事。)
+# 4) nginx:把 deploy/nginx/agent.prod.conf.example 的 location 块并入现有官网
+#    server{}(假设①:不另起 nginx 容器),nginx -t && nginx -s reload
+# 5) 验证:curl 127.0.0.1:8001/health(服务器本机)→ 经域名 /api/agent/health
+# 6) 切流:官网前端浮窗 REACT_APP_AGENT_URL 留空走同源 → 上线路径即 nginx 反代
+```
+
+运维:
+- 日志:`deploy/logs/`(RotatingFileHandler,轮转 5×10MB);容器 stdout 亦有。
+- 重启策略:`unless-stopped` + HEALTHCHECK(/health 30s×3)自动拉起。
+- 扩副本:`--scale agent=N` 目前**不可用**(进程内会话表 `_sessions` 单机语义);
+  会话层外置(Ably,M3)后才放开 —— #116 已声明单 worker 起步。
+- 回滚:`AGENT_VERSION=<上一 tag> docker compose --env-file .env.prod -f docker-compose.prod.yml up -d`。
+- 限流:nginx `limit_req_zone/limit_req` 与 agent 层位置均已预留,参数等 #56/SEC-05。
+
+## CI/CD 需要的 GitHub Secrets(agent 仓库)
+
+| Secret | 值 | 说明 |
+|---|---|---|
+| `DOCKERHUB_TOKEN` | 访问令牌 | `huayeding` 的个人访问令牌(Read & Write) |
+| `DOCKERHUB_LOGIN_USER` | 令牌所属账号名 | **通常不配** —— 登录账号与命名空间同为 `huayeding` 时自动回退即正确;仅在两者不同(如用组织令牌推 org 命名空间)时才需要 |
+| `DEPLOY_HOST_A` | `124.221.222.206` | agent 单实例固定在 Node A |
+| `DEPLOY_USER` | `official-boyuan-club` | 需在 docker 组、且拥有 `/opt/boyuan-agent`(含读 600 的 .env.prod) |
+| `DEPLOY_SSH_KEY` | 部署私钥 | 与后端同一把 |
+
+登录身份必须与 token 所属账号一致——个人令牌配 `username: boyuanclub` 会认证失败
+(实测报 `insufficient_scope: authorization failed`)。
+
+**镜像命名空间为什么是 `huayeding` 而不是 `boyuanclub`**:后端镜像在 `boyuanclub`,
+但 `huayeding` 对该命名空间无推送权(实测),而 `boyuanclub` 的凭证暂不可得。将来
+拿到组织令牌可改回——需同时改 workflow 的 `DOCKER_NAMESPACE` 与服务器 `.env.prod`
+的 `DOCKERHUB_USERNAME`(compose 用它拼镜像名,与上表的登录身份是两回事)。
+
+## 本地测试账号与种子数据
+
+- 统一调试账号:`10245101666@stu.ecnu.edu.cn` / `12345678`(超级管理员;3000/3001 通用)。种子候选人(9002-9006)密码同为 `12345678`。
+- Agent 服务账号:`svc-agent-local`(见仓库 .env;SEC-01,不复用 admin)。
+- 种子:`docker exec -i official-agent-local-mysql-1 mysql -uroot -proot --default-character-set=utf8mb4 < deploy/seed/local-test-data.sql`
+  (幂等;覆盖周期/简历含 PII/场次/安排/结果/调剂/获奖;候选人覆盖待分配、已安排、已通过、调剂中四种状态)。

@@ -4,11 +4,12 @@
 装配须与后端 RBAC 对齐(ADR-0006「社团官网层问答助手」):不能只按粗粒度
 role 给工具,否则会把后端 V22 已从社员角色撤下(如 resume:view)的越权面
 经 query tool 原样露出。**收口后的目标装配(SEC-02 落地,本文件底部
-`_ROLE_TOOL_NAMES` 仍是旧 role 三档,是已知遗留)**:
+`_ROLE_TOOL_NAMES`/装配表仍是旧 role 分档,是已知遗留)**:
 - admin:只读工具集全量(以本人 JWT get_as_user 调后端,后端复核)
-- member / candidate:全局(跨人)查询工具一律不装配 —— member 不再有
-  resume:view(V22 已撤),search_resumes/get_resume_detail 绝不借 svc-agent
-  代读;只装配「本人 scoped」只读(get_my_interview 等),查询绑定本人 JWT。
+- member:全局(跨人)查询工具一律不装配 —— member 不再有 resume:view(V22
+  已撤),search_resumes 等绝不借 svc-agent 代读;只装本人真实持码的只读。
+- candidate:只装本人生周期只读(get_open_cycle + get_my_interview;get_open_cycle
+  供本人取当前开放周期再查本人面试),查询绑定本人 JWT,模型侧不见凭证。
 - unknown:空集(无工具,纯问答;装配层是第一道闸,ADR-0005)
 
 只读通道决断(2026-09-09):本问答助手(官网对话 web 通道)**只读、不装配
@@ -27,7 +28,7 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from pydantic import SecretStr
 
-from official_agent.config import get_settings
+from official_agent.config import get_effective_settings
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.tools import readonly
 
@@ -51,7 +52,7 @@ _ROLE_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "get_recruit_statistics",
         "find_available_sessions",
     ),
-    "candidate": ("get_my_interview",),
+    "candidate": ("get_open_cycle", "get_my_interview"),
     "unknown": (),
 }
 
@@ -111,27 +112,49 @@ def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
 
 
 def identity_message(identity: ResolvedIdentity) -> str:
-    """身份注入文案:作为首条用户消息(动态信息不进 system)。"""
+    """身份注入文案:作为首条用户消息(动态信息不进 system)。
+
+    只含对话需要的档案:称呼、职位、权限边界。不含 user_id/source 等内部
+    标识(用户明确要求)——agent 面对用户时应像面对一个人,不暴露内部字段。
+    """
     role_label = {
         "admin": "管理员",
         "member": "社员",
         "candidate": "候选人",
-        "unknown": "未识别身份",
-    }.get(identity.get("role", "unknown"), "未识别身份")
+        "unknown": "用户",
+    }.get(identity.get("role", "unknown"), "用户")
+    name = identity.get("name")
+    greeting = f"{name}同学" if name and identity.get("role") == "candidate" else (
+        name or role_label
+    )
+    perms = identity.get("permission_codes") or []
+    perm_note = (
+        f",可访问权限: {', '.join(perms[:6])}{' 等' if len(perms) > 6 else ''}"
+        if perms
+        else ",当前无额外数据访问权限"
+    )
     return (
-        f"[会话身份] {role_label}(用户 {identity.get('user_id') or '未知'},"
-        f"来源 {identity.get('source', 'unknown')})。"
-        "后续对话均以此身份为准。"
+        f"当前对话用户是{greeting}({role_label})。"
+        f"{perm_note}。"
+        "回答时用自然称呼,不要提及内部字段。"
     )
 
 
-def _build_model(settings: Any) -> Any:
+def build_model(
+    settings: Any, model: str | None = None, stream_usage: bool = False
+) -> Any:
     """按配置构造对话模型(GRA-08 路由的接入点)。
 
     - anthropic:ANTHROPIC_API_KEY(默认)
     - openai-compatible:OpenAI 兼容端点(DeepSeek 等),LLM_BASE_URL+
       LLM_API_KEY——换模型供应商不改代码
+    model 缺省用 model_strong(对话主模型);其他用途(压缩摘要等)显式传名。
+    stream_usage:流式请求附带 usage 终块(#113 用量自采)——DeepSeek/OpenAI
+    兼容端点必须显式 stream_options.include_usage,且该参数只能随 stream=true
+    使用(非流式 ainvoke 会 400),故只给对话主模型开;摘要器等 ainvoke 调用
+    方保持缺省 False。
     """
+    model = model or settings.model_strong
     if settings.llm_provider == "openai-compatible":
         from langchain_openai import ChatOpenAI
 
@@ -140,13 +163,16 @@ def _build_model(settings: Any) -> Any:
                 "openai-compatible 模式需要在 .env 配置 LLM_BASE_URL 与 LLM_API_KEY"
             )
         return ChatOpenAI(
-            model=settings.model_strong,
+            model=model,
             api_key=SecretStr(settings.llm_api_key),
             base_url=settings.llm_base_url,
+            model_kwargs=(
+                {"stream_options": {"include_usage": True}} if stream_usage else {}
+            ),
         )
     # ChatAnthropic 为 pydantic **kwargs 构造器,mypy 无法静态解析字段
     return ChatAnthropic(  # type: ignore[call-arg]
-        model=settings.model_strong,
+        model=model,
         api_key=SecretStr(settings.anthropic_api_key) if settings.anthropic_api_key else None,  # type: ignore[arg-type]
     )
 
@@ -161,9 +187,9 @@ def build_assistant_agent(
 
     checkpointer(MEM-01):传 AsyncPostgresSaver 则启用多轮持久化;
     None 则纯内存(CLI --session 标识仅作 trace 用)。"""
-    settings = get_settings()
+    settings = get_effective_settings()
     return create_agent(
-        _build_model(settings),
+        build_model(settings, stream_usage=True),
         tools=assemble_tools(identity, user_token),
         system_prompt=load_system_prompt(),
         checkpointer=checkpointer,
