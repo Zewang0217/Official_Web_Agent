@@ -36,7 +36,15 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
 ## 生产上线(Agent 两件套;Backend/前端/nginx 均为既有设施,不动)
 
 ```bash
-# 1) 镜像(发布机):docker build -t boyuanclub/official-agent:<tag> . && docker push ...(#104 同名 org)
+# 1) 镜像:由 CI 自动构建推送(.github/workflows/docker-push.yml)——
+#    main 推送即出镜像 + 自动部署 Node A,正常无需手工构建。
+#    必须走 CI 的原因:Node A 拉不到 ghcr.io(builder 基础镜像在那儿,实测卡
+#    1394 秒),pypi.org 亦超时;开发机反之连不上 auth.docker.io。
+#    应急手工发布(CI 不可用时,开发机 arm64 → 服务器 amd64):
+#      docker pull --platform linux/amd64 docker.m.daocloud.io/library/python:3.12-slim-bookworm
+#      docker tag docker.m.daocloud.io/library/python:3.12-slim-bookworm python:3.12-slim-bookworm
+#      docker buildx build --platform linux/amd64 -t boyuanclub/official-agent:latest --load .
+#      docker save boyuanclub/official-agent:latest | gzip -1 | ssh <node-a> "gunzip | docker load"
 # 2) 服务器:克隆 Agent 仓库到 deploy 目录,cp .env.prod.example .env.prod 填真实值
 #    (BACKEND_BASE_URL / AGENT_PG_PASSWORD / LLM key;gitignore,永不进仓库)
 # 3) cd deploy && docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
@@ -56,6 +64,18 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
   会话层外置(Ably,M3)后才放开 —— #116 已声明单 worker 起步。
 - 回滚:`AGENT_VERSION=<上一 tag> docker compose --env-file .env.prod -f docker-compose.prod.yml up -d`。
 - 限流:nginx `limit_req_zone/limit_req` 与 agent 层位置均已预留,参数等 #56/SEC-05。
+
+## CI/CD 需要的 GitHub Secrets(agent 仓库)
+
+| Secret | 值 | 说明 |
+|---|---|---|
+| `DOCKERHUB_TOKEN` | 访问令牌 | 组织访问令牌(OAT)或有 org 推送权的个人令牌 |
+| `DOCKERHUB_USERNAME` | 令牌所属账号名 | **仅当 token 是个人令牌时需要**(如 `huayeding`);用 OAT 则不配,自动回退到 org 名 `boyuanclub` |
+| `DEPLOY_HOST_A` | `124.221.222.206` | agent 单实例固定在 Node A |
+| `DEPLOY_USER` | `official-boyuan-club` | 需在 docker 组、且拥有 `/opt/boyuan-agent`(含读 600 的 .env.prod) |
+| `DEPLOY_SSH_KEY` | 部署私钥 | 与后端同一把 |
+
+登录身份必须与 token 所属账号一致——个人令牌配 `username: boyuanclub` 会认证失败。
 
 ## 本地测试账号与种子数据
 
