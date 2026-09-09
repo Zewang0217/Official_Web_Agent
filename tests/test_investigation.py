@@ -172,8 +172,8 @@ def _install_fake_explore(monkeypatch, chars: int = 2000) -> None:
     monkeypatch.setattr(ig, "run_explore", _fake_run_explore)
 
 
-def _install_fake_gh_and_model(monkeypatch, payload: str) -> None:
-    _install_fake_explore(monkeypatch)
+def _install_fake_gh_and_model(monkeypatch, payload: str, explore_chars: int = 2000) -> None:
+    _install_fake_explore(monkeypatch, chars=explore_chars)
     monkeypatch.setattr(ig, "GitHubClient", _FakeGH)
 
     class _Msg:
@@ -413,3 +413,21 @@ async def test_deep_dive_not_forced_four_distinct_anchors(monkeypatch) -> None:
     _install_fake_gh_and_model(monkeypatch, four_same)
     qs = await ig.run_investigation("项目 https://github.com/me/demo 报名页")
     assert qs["mode"] == "repo_deep_dive" and len(qs["questions"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_worthiness_low_yields_two_questions(monkeypatch) -> None:
+    """#151 评审 P2:worthiness low 分支(dossier < 1500 字符)→ deep_dive 2 题。"""
+    _install_fake_explore(monkeypatch, chars=200)  # 低体量 → low → 2 题
+
+    two_q = (
+        '{"repo_summary": "社团官网", "questions": ['
+        + _q("architecture", "src/app.py", "报名页的前端状态是怎么管理的?")
+        + ","
+        + _q("tradeoff", "README.md", "现在重写你会改哪个架构决定?")
+        + "]}"
+    )
+    _install_fake_gh_and_model(monkeypatch, two_q, explore_chars=200)
+    qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
+    assert qs["mode"] == "repo_deep_dive"
+    assert len(qs["questions"]) == 2

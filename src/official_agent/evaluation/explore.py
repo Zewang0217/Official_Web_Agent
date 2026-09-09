@@ -13,6 +13,7 @@ prompt cache 纪律(D8):system(技能文本)跨候选字节稳定——不嵌时
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -25,18 +26,20 @@ from official_agent.evaluation.github_client import GitHubClient, GitHubUnavaila
 MAX_TURNS = 80
 MAX_WALL_SECONDS = 300
 
-#: 工具观察 → dossier 槽位(确定性映射;同观察可入多槽,槽语义见 dossier.SLOT_NAMES)
+#: 工具观察 → dossier 槽位(确定性映射;同观察逐槽全写,不做短路)
 _SLOT_BY_TOOL: dict[str, tuple[str, ...]] = {
-    "repo_meta": ("C1_动机定位", "C5_规模数字"),
+    "repo_meta": ("C1_动机定位", "C2_技术选型", "C5_规模数字"),
     "list_files": ("C3_架构分层",),
     "read_file": ("C4_核心实现", "C7_边界处理"),
-    "search_in_repo": ("C10_路线痕迹",),
+    "search_in_repo": ("C7_边界处理", "C10_路线痕迹"),
     "read_commits": ("C6_提交叙事",),
     "commit_detail": ("C6_提交叙事", "C4_核心实现"),
     "search_issues": ("C8_协作贡献",),
     "search_repos": ("C1_动机定位",),
     "list_user_repos": ("C1_动机定位",),
 }
+# C9 变更应力不单列映射:配置/CI/扩展点类 read_file 观察落 C4/C7 后由出题段
+# 引用(spec「不必每类必有材料」);单列会令每次读码都灌 C9,稀释槽位语义。
 
 
 def _observation_text(tool_name: str, payload: Any) -> str:
@@ -176,7 +179,10 @@ async def explore_repo(
                     f"dossier {dossier.total_chars} 字符]"
                 )
             )
-            response = await model.ainvoke(messages)
+            remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
+            response = await asyncio.wait_for(
+                model.ainvoke(messages), timeout=max(remaining, 1.0)
+            )
             messages.append(response)
             usage = getattr(response, "usage_metadata", None) or {}
             input_tokens += int(usage.get("input_tokens") or 0)
@@ -185,12 +191,13 @@ async def explore_repo(
             if not tool_calls:
                 break  # 材料自认充分,正常终止
             written_slots: list[str] = []
+            turn += len(tool_calls)  # D7:轮数 = LLM 调用 + 工具调用累计
             for tc in tool_calls:
                 tool_name = tc.get("name") or ""
                 tool = tools_by_name.get(tool_name)
+                payload = None  # 预绑定:首调用即炸时 isinstance 判定不炸
                 if tool is None:
                     observation = f"未知工具 {tool_name}"
-                    payload = None
                 else:
                     try:
                         payload = await tool.coroutine(**(tc.get("args") or {}))
@@ -202,10 +209,11 @@ async def explore_repo(
                 if tool_name == "list_files" and isinstance(payload, tuple):
                     dossier.paths, dossier.paths_truncated = payload
                 slots = _SLOT_BY_TOOL.get(tool_name, ())
+                # 逐槽写入(any 会短路,多槽元组实际只进首槽——评审 P1)
                 written = (
-                    any(dossier.add(slot, observation) for slot in slots)
+                    [dossier.add(slot, observation) for slot in slots]
                     if observation
-                    else False
+                    else []
                 )
                 if written:
                     hit = [

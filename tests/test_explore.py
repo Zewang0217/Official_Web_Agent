@@ -116,7 +116,7 @@ async def test_tool_roundtrip_writes_slots_and_paths() -> None:
     assert "read_file:src/app.py" in client.calls
     assert dossier.slots["C3_架构分层"]  # 观察进槽
     assert dossier.slots["C4_核心实现"]
-    assert dossier.turns_used == 2
+    assert dossier.turns_used == 4  # 2 次 LLM + 2 次工具(D7 累计)
     assert not dossier.degraded
     assert dossier.attribution == "trusted-own"
 
@@ -241,7 +241,7 @@ async def test_cache_discipline_append_only_and_static_system() -> None:
     # 步数计数放 user 消息尾部(每轮一条,递增)
     user_texts = [m.content for m in second if isinstance(m, HumanMessage)]
     assert any("[探索步 1/" in t for t in user_texts)
-    assert user_texts[-1].startswith("[探索步 2/")  # 尾部=最新步数
+    assert user_texts[-1].startswith("[探索步 3/")  # 尾部=最新步数(含工具调用累计)
 
 
 @pytest.mark.asyncio
