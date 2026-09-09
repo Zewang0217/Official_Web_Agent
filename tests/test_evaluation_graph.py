@@ -211,3 +211,22 @@ async def test_all_zero_llm_card_marks_hard_zero() -> None:
         card = await ev.run_evaluation(_FIELDS, resume_id=8, cycle_id=2026)
     assert card["hard_zero"] is True
     assert card["total"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_near_quote_evidence_accepted() -> None:
+    """B8 实测:忠实引述有一字压缩(「大一起接触」→「大一接触」)应放行。"""
+    payload = (
+        '{"dimensions": ['
+        '{"field_key": "intro", "score": 80, "rationale": "r",'
+        ' "evidence": "我是张三,做过两 Web 项目"},'
+        '{"field_key": "reason", "score": 40, "rationale": "r",'
+        ' "evidence": "认同社团氛围,想参与招新开发。"}],'
+        '"attitude": {"verdict": "sincere", "reason": "r"}}'
+    )
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _fake_model(payload)),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        card = await ev.run_evaluation(_FIELDS, resume_id=2, cycle_id=2026)
+    assert card["hard_zero"] is False  # 近似引述(掉一字)放行,不翻 error

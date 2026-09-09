@@ -83,8 +83,12 @@ async def run_bundle(
     project_text = _project_text(fields)
 
     # 仓线(B3)。单线失败降级为空错误组,不炸整条 bundle(B4 评审 P2)
+    settings = get_effective_settings()
+    effective_token = github_token or settings.github_token
     try:
-        repo_envelope = await ig.run_investigation(project_text, github_token=github_token)
+        repo_envelope = await ig.run_investigation(
+            project_text, github_token=effective_token
+        )
         groups.append({"group": "repo", **repo_envelope})
     except Exception as exc:  # noqa: BLE001
         groups.append(

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     embed_model: str = ""
     embed_dim: int = 0  # 0=不校验;>0 时与端点返回维度强校验
 
+    # GitHub 仓深挖(B3,检查点④):读公开仓的 PAT;匿名 60 次/h,token 5000 次/h
+    github_token: str = ""
+
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 

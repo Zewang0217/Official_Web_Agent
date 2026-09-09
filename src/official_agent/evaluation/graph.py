@@ -128,11 +128,25 @@ async def finalize_hard(state: EvaluationState) -> dict:
 
 
 def _evidence_in(evidence: str, source: str) -> bool:
-    """证据逐字性:归一空白后 evidence 必须是原文子串(B1 评审 P1-2)。"""
+    """证据逐字性:归一空白后 evidence 是原文子串,或与原文的最长公共
+    连续块 ≥ 85%(B8 实测:模型忠实引述时偶有一字压缩——「大一起接触」
+    →「大一接触」——近似引述放行;编造证据的公共块极短,仍拒绝)。
+    """
+    from difflib import SequenceMatcher
+
     def norm(s: str) -> str:
         return "".join(s.split())
-    ev = norm(evidence)
-    return bool(ev) and ev in norm(source)
+
+    ev, src = norm(evidence), norm(source)
+    if not ev:
+        return False
+    if ev in src:
+        return True
+    # 串中掉一字会把「最长公共块」劈成两半,改用匹配块总覆盖:
+    # 证据字符 ≥85% 能按序在原文中找到(含掉字/标点差异)即算忠实引述
+    matcher = SequenceMatcher(None, ev, src, autojunk=False)
+    covered = sum(b.size for b in matcher.get_matching_blocks())
+    return covered >= max(8, int(len(ev) * 0.85))
 
 
 async def llm_score(state: EvaluationState) -> dict:
