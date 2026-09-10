@@ -235,7 +235,7 @@ def test_flatten_v2_pickable_covers_all_roles() -> None:
     }
     from official_agent.state.qbank import flatten_v2_pickable
 
-    flat = flatten_v2_pickable(envelope)
+    flat = flatten_v2_pickable(envelope, resume_id=9, cycle_id=2026, qbank_version=1)
     roles = [(f["group_kind"], f["role"], f["question"]) for f in flat]
     assert ("repo", "entry", "入口题?") in roles
     assert ("repo", "chain", "L1") in roles and ("repo", "chain", "L2") in roles
@@ -321,7 +321,7 @@ def test_resolve_picks_rejects_duplicate_text_without_ref(monkeypatch) -> None:
     """#179:同文多题的旧形状引用必拒——这正是按题文反查串源的根源。"""
     env = _dup_envelope()
     monkeypatch.setattr(qbank, "latest_qbank", lambda r, c: {"envelope": env, "qbank_version": 3})
-    with pytest.raises(LookupError, match="不符"):
+    with pytest.raises(LookupError, match="不唯一"):
         qbank.resolve_picks(9, 2026, [{"question": "同文题?"}])
 
 

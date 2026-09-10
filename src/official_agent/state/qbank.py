@@ -136,7 +136,8 @@ def record_pick(
     question_ref: dict[str, Any],
     schedule_id: int | None = None,
 ) -> int:
-    """记一道勾选题(题引用:anchor/question/evidence_path)。返回 pick id。"""
+    """记一道勾选题(#179:question_ref 必须是 resolve_picks 解析出的权威
+    条目,含 ref_id 与定位索引)。返回 pick id。"""
     with _conn() as conn:
         ensure_qbank_tables(conn)
         row = conn.execute(
@@ -178,9 +179,9 @@ def list_picks(resume_id: int, cycle_id: int) -> list[dict[str, Any]]:
 
 def _ref_id(
     ref: dict[str, Any],
-    resume_id: int | None,
-    cycle_id: int | None,
-    qbank_version: int | None,
+    resume_id: int,
+    cycle_id: int,
+    qbank_version: int,
 ) -> str:
     """稳定题引用 id(#179):sha256 前 16 位,输入含 resume/cycle/题库版本
     + 组内定位(索引+角色+题文)。同文题靠索引区分,题库重跑换版本即换 id。"""
@@ -203,9 +204,9 @@ def _ref_id(
 def flatten_v2_pickable(
     envelope: dict[str, Any],
     *,
-    resume_id: int | None = None,
-    cycle_id: int | None = None,
-    qbank_version: int | None = None,
+    resume_id: int,
+    cycle_id: int,
+    qbank_version: int,
 ) -> list[dict[str, Any]]:
     """v2 信封 → 可挑题扁平视图(#153):UI 挑题不用懂组内嵌套。
 
@@ -313,22 +314,31 @@ def resolve_picks(
     for q in submitted:
         if not isinstance(q, dict) or not str(q.get("question") or "").strip():
             raise LookupError("勾选题缺少 question 文本,拒绝记录")
-        match = _match_entry(entries, q)
+        match, ambiguous = _match_entry(entries, q)
         if match is None:
-            raise LookupError("勾选题与当前题库不符(题库可能已重跑更新),请刷新题库后重试")
+            if ambiguous:
+                raise LookupError(
+                    "该题文在当前题库不唯一(同文多题),需带 ref_id/定位索引才能勾选;"
+                    "旧版前端请升级后重试"
+                )
+            raise LookupError("勾选题与当前题库不符,请刷新题库后重试")
         resolved.append(match)
     return resolved
 
 
-def _match_entry(entries: list[dict[str, Any]], q: dict[str, Any]) -> dict[str, Any] | None:
-    """单题匹配;无匹配或有歧义返回 None(歧义与未知的响应一致:拒)。"""
+def _match_entry(
+    entries: list[dict[str, Any]], q: dict[str, Any]
+) -> tuple[dict[str, Any] | None, bool]:
+    """单题匹配。返回 (权威条目, 是否歧义):None+True=同文多题需 ref_id,
+    None+False=题库中无该题(含 ref_id 过期且题文已不存在)。"""
     ref_id = str(q.get("ref_id") or "")
     if ref_id:
         by_id = [e for e in entries if e.get("ref_id") == ref_id]
         if len(by_id) == 1:
-            return by_id[0]
+            return by_id[0], False
     if "anchor" in q:
-        # 旧形状投影(#179 之前的 frontend doPick):文本+anchor+证据全对上
+        # 旧形状投影(#179 之前的 frontend doPick):文本+anchor+证据全对上;
+        # 注意 ref_id 未命中会落到这里按题文重查——题文仍唯一时绑定当前版条目
         cands = [
             e
             for e in entries
@@ -348,4 +358,6 @@ def _match_entry(entries: list[dict[str, Any]], q: dict[str, Any]) -> dict[str, 
             for e in entries
             if all(str(e.get(k, "")) == str(v) for k, v in q.items() if k != "ref_id")
         ]
-    return cands[0] if len(cands) == 1 else None
+    if len(cands) == 1:
+        return cands[0], False
+    return None, len(cands) > 1

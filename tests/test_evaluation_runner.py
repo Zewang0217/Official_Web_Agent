@@ -567,3 +567,23 @@ def test_eval_job_trace_id_deterministic() -> None:
     assert eval_job_trace_id(7) == eval_job_trace_id(7)
     assert eval_job_trace_id(7) != eval_job_trace_id(8)
     assert len(eval_job_trace_id(7)) == 32  # W3C trace-id 段
+
+
+@pytest.mark.asyncio
+async def test_pii_exit_covers_x_id_and_long_student_ids() -> None:
+    """#176 评审 P2:身份证尾号 X、12-17 位学号/准考证号必须被掩。"""
+    from official_agent.security.pii import mask_pii
+
+    masked = mask_pii("证件 11010119900307775X 学号 202102345678")
+    assert "11010119900307775X" not in masked
+    assert "202102345678" not in masked
+    assert mask_pii("13812345678") == "138****5678"  # 常规规则不回归
+
+
+def test_hard_zero_survives_masking(monkeypatch) -> None:
+    """#176 评审 P3:纯数字敷衍回答掩码后(含 *)仍命中确定性硬 0。"""
+    from official_agent.evaluation.scoring import is_hard_zero_value
+
+    assert is_hard_zero_value("138****5678")
+    assert is_hard_zero_value("************")
+    assert not is_hard_zero_value("138****5678,项目经验丰富")  # 有实质内容不误伤

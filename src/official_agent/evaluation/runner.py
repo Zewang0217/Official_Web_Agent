@@ -182,7 +182,10 @@ def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[F
     out: list[FieldText] = []
     hits = 0
     for f in fields:
+        # placeholder 与 value 走同一键级掩(#176 评审):姓名类字段的
+        # 「与 placeholder 同文」全等判在掩码后仍成立
         masked_value = mask_pii_deep([{f.field_key: f.value}])[0][f.field_key]
+        masked_ph = mask_pii_deep([{f.field_key: f.placeholder}])[0][f.field_key]
         if masked_value != f.value:
             hits += 1
         out.append(
@@ -190,7 +193,7 @@ def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[F
                 field_key=f.field_key,
                 title=str(mask_pii_deep(f.title)),
                 value=str(masked_value),
-                placeholder=str(mask_pii_deep(f.placeholder)),
+                placeholder=str(masked_ph),
             )
         )
     if hits:

@@ -14,7 +14,9 @@ import re
 from dataclasses import dataclass
 
 # 纯数字/标点(允许分隔符,但必须出现过数字):整栏 111、2024.09 等
-_PURE_DIGIT = re.compile(r"^[\d\s.,，。、\-—_]+$")
+# #176 评审:脱敏产物 138****5678 亦视为纯数字敷衍——掩码前的纯数字
+# 敷衍回答不应因掩码引入的 * 而逃过确定性硬 0。
+_PURE_DIGIT = re.compile(r"^[\d\s.,，。、\-—_*]+$")
 # 常见 placeholder 前缀(表单引导文案)
 _PLACEHOLDER_PREFIX = ("请输入", "请填写", "请描述", "请介绍", "在此输入")
 # 主观题下的敷衍词( standalone 回答即绝对卡)

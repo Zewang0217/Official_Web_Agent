@@ -258,7 +258,7 @@ async def test_bundle_repo_v2_envelope_end_to_end(monkeypatch) -> None:
     # flatten 视图覆盖入口+链层
     from official_agent.state.qbank import flatten_v2_pickable
 
-    flat = flatten_v2_pickable(envelope)
+    flat = flatten_v2_pickable(envelope, resume_id=9, cycle_id=2026, qbank_version=1)
     assert [f["role"] for f in flat if f["group_kind"] == "repo"] == [
         "entry",
         "chain",
