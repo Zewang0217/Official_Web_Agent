@@ -126,7 +126,7 @@ async def finalize_hard(state: EvaluationState) -> dict:
             "model": settings.model_strong,
         },
     }
-    return {"card": card, "error": None}
+    return {"card": card, "error": None, "llm_usage": {}}
 
 
 def _evidence_in(evidence: str, source: str) -> bool:
@@ -139,7 +139,7 @@ def _evidence_in(evidence: str, source: str) -> bool:
     return bool(ev) and ev in norm(source)
 
 
-async def llm_score(state: EvaluationState) -> dict:
+async def llm_score(state: EvaluationState, config: Any = None) -> dict:
     """结构化打分:逐维给分+依据+原文证据,态度判定;异常进 error(B2 可重试)。"""
     try:
         settings = get_effective_settings()
@@ -163,12 +163,16 @@ async def llm_score(state: EvaluationState) -> dict:
             + "\n\nfield_key 取值必须是:"
             + ",".join(f["field_key"] for f in state["fields"])
         )
-        resp = await model.ainvoke([HumanMessage(content=prompt_text)])
+        resp = await model.ainvoke(
+            [HumanMessage(content=prompt_text)],
+            config=config,
+        )
+        llm_usage = None
         um = getattr(resp, "usage_metadata", None)
         if um:
             from official_agent.state.conversation import extract_usage
 
-            state["llm_usage"] = extract_usage(um)
+            llm_usage = extract_usage(um)
         raw = resp.content
         if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
             raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
@@ -218,7 +222,7 @@ async def llm_score(state: EvaluationState) -> dict:
                 "model": settings.model_strong,
             },
         }
-        return {"card": card, "error": None}
+        return {"card": card, "error": None, "llm_usage": llm_usage}
     except Exception as exc:  # noqa: BLE001 — 失败进 error 态,B2 任务可重试
         return {"card": None, "error": f"{type(exc).__name__}: {exc}"}
 

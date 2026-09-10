@@ -29,7 +29,7 @@ class _FakeMsg:
 
 def _fake_model(payload: str):
     class _M:
-        async def ainvoke(self, messages):
+        async def ainvoke(self, messages, config=None):
             return _FakeMsg(payload)
 
     return _M()
@@ -210,3 +210,76 @@ async def test_all_zero_llm_card_marks_hard_zero() -> None:
         card = await ev.run_evaluation(_FIELDS, resume_id=8, cycle_id=2026)
     assert card["hard_zero"] is True
     assert card["total"] == 0.0
+
+
+# ── #183:评分 token 经 usage_out 回传 + correlation_id 进 config metadata ──
+
+
+class _UsageMsg:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.usage_metadata = {
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+        }
+
+
+def _usage_model(payload: str):
+    class _M:
+        async def ainvoke(self, messages, config=None):
+            return _UsageMsg(payload)
+
+        def with_structured_output(self, schema, **kwargs):  # pragma: no cover
+            raise NotImplementedError
+
+    return _M()
+
+
+@pytest.mark.asyncio
+async def test_scoring_usage_flows_to_usage_out() -> None:
+    """#183 P1:llm_score 的 usage 经节点返回值 → run_evaluation usage_out。"""
+    usage_out: dict = {}
+
+    def _model(*a, **k):
+        return _usage_model(_GOOD_JSON)
+
+    with (
+        patch.object(ev, "build_model", _model),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        await ev.run_evaluation(
+            _FIELDS,
+            resume_id=11,
+            cycle_id=2026,
+            usage_out=usage_out,
+            correlation_id="corr-test-123",
+        )
+    assert usage_out.get("input_tokens") == 120
+    assert usage_out.get("output_tokens") == 30
+
+
+@pytest.mark.asyncio
+async def test_correlation_id_lands_in_root_metadata() -> None:
+    """#183 P2:correlation_id 经根 run config.metadata 进回调(Langfuse 关联键)。"""
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    seen: dict = {}
+
+    class _RecordingHandler(BaseCallbackHandler):
+        def on_chain_start(self, serialized, inputs, *, metadata=None, **kwargs):
+            seen.setdefault("metadata", metadata or {})
+
+    class _M:
+        async def ainvoke(self, messages, config=None):
+            return _UsageMsg(_GOOD_JSON)
+
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _M()),
+        patch.object(ev, "get_effective_settings", _settings),
+        patch("official_agent.observability.langfuse_callbacks", lambda: [_RecordingHandler()]),
+    ):
+        await ev.run_evaluation(
+            _FIELDS, resume_id=12, cycle_id=2026, correlation_id="corr-abc"
+        )
+    assert seen["metadata"].get("correlation_id") == "corr-abc"
