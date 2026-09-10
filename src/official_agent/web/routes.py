@@ -27,8 +27,8 @@ from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from official_agent.graphs.assistant import (
+    _ROLE_TOOL_NAMES,  # noqa: PLC2701 — 同模块装配表(prefix_hash 证据)
     build_assistant_agent,
-    compose_first_message,
     tool_roster,
 )
 from official_agent.graphs.assistant.compression import (
@@ -341,13 +341,10 @@ async def _stream_turn(
             "callbacks": langfuse_callbacks(),
         }
 
-        # M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)——
-        # 压缩掉早期上下文后身份边界仍在最近窗口;前缀含首轮身份段,
-        # 同 session 内缓存仍命中(身份块小,重注成本可忽略)。
-        first_input = HumanMessage(
-            content=compose_first_message(session.identity, session.user_token)
-        )
-        messages: list = [first_input, HumanMessage(content=message)]
+        # #166 修复:身份/权限上下文已移入 system prompt(build_system_prompt),
+        # 不再作为首条用户消息注入——checkpointer 不再存内部指令,历史回看
+        # 不会把它渲染成用户气泡。直接以用户原文开轮。
+        messages: list = [HumanMessage(content=message)]
 
         # 契约 #90:首事件 session(带 created 标记新/续传)
         yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
@@ -429,7 +426,10 @@ async def _stream_turn(
         # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
         # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
         # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
-        from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
+        # #166 后实际 system = 静态正文 + 身份段 + 工具契约(随角色变);
+        # hash 必须基于真实 system,否则"缓存命中证据"失真。同角色会话内
+        # 前缀稳定(身份块同 session 不变),仍可作命中率观察。
+        from official_agent.graphs.assistant import build_system_prompt
 
         # GRA-04 #161:编造守卫在一切持久化之前——直播(缓冲 delta)、
         # conversation_log、checkpointer(回看/下轮上下文)三面同用改写文本。
@@ -464,10 +464,9 @@ async def _stream_turn(
         # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
         compress_event = await _compress_if_needed(session, config, message)
-
         role = session.identity.get("role") or "unknown"
         tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
-        p_hash = prefix_hash(load_system_prompt(), tool_names)
+        p_hash = prefix_hash(build_system_prompt(session.identity), tool_names)
         if any(usage_acc.values()):
             usage = usage_acc
         else:

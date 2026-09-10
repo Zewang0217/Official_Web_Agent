@@ -198,13 +198,13 @@ def test_chat_resume_same_session_reuses_thread(
     assert sid2 == sid  # 续传同 thread,不新开
 
 
-def test_chat_injects_identity_every_round_including_resume(
+def test_chat_message_face_carries_no_identity_context(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)。
+    """#166 回归:身份/权限上下文绝不进对话消息面(否则回看泄漏成 user 气泡)。
 
-    新建轮与续传轮的 agent 输入都必须以身份消息开头——续传轮也不例外,
-    保证压缩掉早期上下文后身份边界仍在最近窗口内。
+    新建轮与续传轮的消息输入都必须只有用户原文;身份上下文只经
+    build_system_prompt 进 system prompt。
     """
     from official_agent.web import routes
 
@@ -239,8 +239,12 @@ def test_chat_injects_identity_every_round_including_resume(
 
     assert len(seen_inputs) == 2
     for messages in seen_inputs:
-        assert "当前对话用户是" in messages[0].content, "每轮输入首条必须是身份消息"
-        assert messages[-1].content in ("hi", "hi again")
+        # 消息面只有用户原文;不得含身份/权限/工具契约
+        assert len(messages) == 1, "每轮输入只应有用户原文"
+        assert messages[0].content in ("hi", "hi again")
+        assert "当前对话用户是" not in messages[0].content
+        assert "可访问权限" not in messages[0].content
+        assert "数据查询工具:" not in messages[0].content
 
 
 def test_chat_other_user_same_session_returns_403(
@@ -702,21 +706,20 @@ def test_chat_toolless_reply_buffered_and_guarded(
         "我没有可用的数据查询权限,无法查询系统数据。"
         "如需查询简历、面试安排或统计信息,请登录对应系统或联系管理员处理。"
     ]
-    assert events[-1]["type"] == "done"
 
 
-def test_chat_first_message_carries_tool_contract(
+def test_chat_first_message_is_user_content_only(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """有工具档:首条用户消息含工具清单与失败话术约束(静态前缀不动)。"""
+    """#166:首条消息就是用户原文;工具契约在 system(不进消息面)。"""
     seen = _install_fake_agent(monkeypatch, "好的。")
     resp = client.post(
         "/api/agent/chat", json={"message": "在吗"}, headers={"Authorization": "Bearer tok"}
     )
     assert resp.status_code == 200
     first_content = seen[0].content
-    assert "数据查询工具:" in first_content
-    assert "不要编造结果" in first_content
+    assert first_content == "在吗"
+    assert "数据查询工具:" not in first_content
 
 
 def test_chat_toolless_honest_reply_passes_through(

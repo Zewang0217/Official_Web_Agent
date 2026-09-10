@@ -249,14 +249,10 @@ def test_chat_resume_existing_thread_no_duplicate_identity_prefix(
 
 
 @respx.mock
-def test_chat_first_round_failure_reinjects_identity_next_round(
+def test_chat_first_round_failure_message_face_stays_user_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """H-2 回归:首轮失败(未持久化)→ 第二轮自动重发身份前缀。
-
-    修复前 turn 单调递增,失败轮丢失前缀后永不恢复;修复后判据是
-    aget_state 无历史 → 失败轮后续自动重发。
-    """
+    """H-2 + #166:首轮失败后第二轮正常;消息面始终只有用户原文(无身份前缀)。"""
     respx.post(LOGIN).mock(side_effect=lambda _: _login_ok())
     _install_mock_backend()
 
@@ -290,9 +286,11 @@ def test_chat_first_round_failure_reinjects_identity_next_round(
     assert result.exit_code == 0
     assert len(seen_inputs) == 1  # 第二问成功,第一问失败
     msgs = seen_inputs[0]
-    # 第二轮重新带上了身份前缀(首轮失败未持久化 → 仍视为新线程);新文案以
-    # 「当前对话用户」开头(identity_message 去掉了内部字段,不再含「身份」字样)
-    assert any(getattr(m, "type", "") == "human" and "当前对话用户" in str(m.content) for m in msgs)
+    # 消息面只有用户原文:无身份前缀(否则回看泄漏)、含本轮输入
+    assert not any(
+        getattr(m, "type", "") == "human" and "当前对话用户" in str(m.content)
+        for m in msgs
+    )
     assert any("第二问" in str(m.content) for m in msgs)
     readonly.set_backend_client(None)
 

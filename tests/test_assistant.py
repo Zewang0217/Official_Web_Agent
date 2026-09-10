@@ -309,45 +309,48 @@ def test_build_model_openai_compatible_missing_config_fails() -> None:
         build_model(settings)
 
 
-# ── 工具契约(GRA-04,#161):清单进首条用户消息,不进 system ──
+# ── 身份/工具契约进 system prompt(#166 修复)──────
 
 
-def test_compose_first_message_unknown_forbids_claims() -> None:
+def test_tool_contract_unknown_forbids_claims() -> None:
     """空工具档(unknown):明令不得声称查询——编造守卫第一层。"""
-    from official_agent.graphs.assistant import compose_first_message
+    from official_agent.graphs.assistant import tool_contract
 
-    msg = compose_first_message(identity_of("unknown"))
-    assert "没有可用的数据查询工具" in msg
-    assert "绝不能声称查询过" in msg
-    assert "引导" in msg
+    contract = tool_contract(identity_of("unknown"))
+    assert "没有可用的数据查询工具" in contract
+    assert "绝不能声称查询过" in contract
+    assert "引导" in contract
 
 
-def test_compose_first_message_admin_lists_tools_and_failure_talk() -> None:
-    from official_agent.graphs.assistant import compose_first_message, tool_roster
+def test_tool_contract_admin_lists_tools_and_failure_talk() -> None:
+    from official_agent.graphs.assistant import tool_contract, tool_roster
 
-    msg = compose_first_message(identity_of("admin"))
+    contract = tool_contract(identity_of("admin"))
     roster = tool_roster(identity_of("admin"))
     assert roster  # admin 有工具
     for name in roster:
-        assert name in msg
-    assert "不要声称「查询过」" in msg
-    assert "不要编造结果" in msg
+        assert name in contract
+    assert "不要声称「查询过」" in contract
+    assert "不要编造结果" in contract
 
 
-def test_tool_contract_stays_out_of_system_prompt() -> None:
-    """静态前缀纪律:契约是角色相关的,只准在首条用户消息。"""
+def test_identity_and_contract_live_in_system_prompt_not_user_message() -> None:
+    """#166:身份/契约进 system prompt,绝不作为用户消息(泄漏成气泡)。"""
     from official_agent.graphs.assistant import (
+        build_system_prompt,
         compose_first_message,
         load_system_prompt,
     )
 
-    system = load_system_prompt()
-    assert "数据查询工具:" not in system
-    assert "绝不能声称查询过" not in system
-    # 首条消息仍以身份注入开头(拼接语义)
-    assert compose_first_message(identity_of("admin")).startswith(
-        identity_message(identity_of("admin"))
-    )
+    system = build_system_prompt(identity_of("admin"))
+    # system 含静态正文 + 身份段 + 工具契约
+    assert load_system_prompt() in system
+    assert identity_message(identity_of("admin")) in system
+    assert "数据查询工具:" in system
+    # 首条用户消息不含任何内部字段(不再泄漏)
+    first = compose_first_message("tok")
+    assert "可访问权限" not in first
+    assert "数据查询工具:" not in first
 
 
 def test_tool_roster_matches_assembly() -> None:

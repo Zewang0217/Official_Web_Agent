@@ -24,7 +24,6 @@ from official_agent.config import get_settings
 from official_agent.graphs.assistant import (
     assemble_tools,
     build_assistant_agent,
-    compose_first_message,
     tool_roster,
 )
 from official_agent.graphs.identity import resolve
@@ -196,10 +195,8 @@ async def _chat(username: str, password: str, session: str) -> None:
             f"exit/退出 结束"
         )
 
-        # 身份每轮注入(M6 #114,决策 #108 质量优先):压缩掉早期上下文后
-        # 身份边界仍在最近窗口;重复注入幂等无害(同身份同文案,块很小)。
-        # 失败轮未持久化 → 下轮照常重注,天然覆盖 H-2 场景。
-        first_input = HumanMessage(content=compose_first_message(identity, user_token))
+        # #166 修复:身份/契约已移入 system prompt(build_assistant_agent),
+        # 不再注入首条用户消息——对话消息面不含内部指令。
         chat_history: list = []  # 仅降级路径使用:本地历史累积
         while True:
             try:
@@ -214,12 +211,11 @@ async def _chat(username: str, password: str, session: str) -> None:
                 return
 
             if saver is not None:
-                # M6 #114:持久化路径同样每轮注入身份(与 web 通道一致,
-                # 决策 #108 质量优先;不再依赖 aget_state 判新旧的 H-1 逻辑)
-                messages = [first_input, HumanMessage(content=user_input)]
+                # 持久化路径:#166 后无身份前缀,消息直接以用户原文接力
+                messages = [HumanMessage(content=user_input)]
             else:
                 # 降级:本地累积,保证多轮不失忆(原 CLI 语义)
-                messages = [first_input, *chat_history, HumanMessage(content=user_input)]
+                messages = [*chat_history, HumanMessage(content=user_input)]
             try:
                 history_out = await _run_turn(
                     agent,
@@ -229,8 +225,8 @@ async def _chat(username: str, password: str, session: str) -> None:
                     buffer_reply=not tool_roster(identity),
                 )
                 if saver is None:
-                    # 降级:用返回的累积历史推进本地会话(首轮前缀除外)
-                    chat_history = [m for m in history_out if m is not first_input]
+                    # 降级:用返回的累积历史推进本地会话
+                    chat_history = list(history_out)
             except KeyboardInterrupt:
                 console.print("\n[dim]已中断本轮(历史保留)[/dim]")
                 continue
