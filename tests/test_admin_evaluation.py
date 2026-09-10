@@ -59,7 +59,7 @@ def test_evaluation_requires_auth(client: TestClient) -> None:
 def test_evaluation_rejects_without_resume_audit(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """评审权是 resume:audit;agent:monitor/kb:manage 都不算(#135 用户故事 1)。"""
+    """#177:发起初筛是执行权 evaluation:run;查看权 resume:audit 不放行。"""
     _install_resolve(monkeypatch, _identity(["agent:monitor", "kb:manage"]))
     resp = client.post(
         "/api/agent/admin/evaluation/run",
@@ -67,13 +67,27 @@ def test_evaluation_rejects_without_resume_audit(
         json={"cycle_id": 2026, "items": [{"resume_id": 1}]},
     )
     assert resp.status_code == 403
-    assert "resume:audit" in resp.json()["detail"]
+    assert "evaluation:run" in resp.json()["detail"]
+
+
+def test_evaluation_run_rejects_view_only_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#177:只有 resume:audit(可看结果)不能发起运行——查看与执行分别授权。"""
+    _install_resolve(monkeypatch, _identity(["resume:audit"]))
+    resp = client.post(
+        "/api/agent/admin/evaluation/run",
+        headers=_AUTH,
+        json={"cycle_id": 2026, "items": [{"resume_id": 1}]},
+    )
+    assert resp.status_code == 403
+    assert "evaluation:run" in resp.json()["detail"]
 
 
 def test_evaluation_run_submits_jobs(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from official_agent.web import evaluation_admin as ea
 
-    _install_resolve(monkeypatch, _identity(["resume:audit"]))
+    _install_resolve(monkeypatch, _identity(["evaluation:run", "resume:audit"]))
     captured: dict = {}
 
     class _FakeRunner:
@@ -104,7 +118,7 @@ def test_evaluation_run_submits_jobs(client: TestClient, monkeypatch: pytest.Mon
 def test_evaluation_run_rejects_empty_items(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _install_resolve(monkeypatch, _identity(["resume:audit"]))
+    _install_resolve(monkeypatch, _identity(["evaluation:run"]))
     resp = client.post(
         "/api/agent/admin/evaluation/run",
         headers=_AUTH,

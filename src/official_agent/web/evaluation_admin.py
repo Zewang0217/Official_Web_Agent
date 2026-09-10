@@ -33,6 +33,21 @@ async def _require_resume_audit(
     return identity
 
 
+async def _require_evaluation_run(
+    request: Request, authorization: Annotated[str | None, Header()] = None
+):
+    """初筛执行权(#177):与 resume:audit(查看权)解耦的独立权限码。
+
+    触发/重试 AI 初筛必须持 evaluation:run(后端 V46:仅超管与管理员
+    授予;面试官/普通审核员不持有);前端按钮显隐用同一权限码,双侧
+    拒绝语义一致。Backend 侧简历状态 6 写入同样验此码(服务账号)。"""
+    identity, _ = await _authenticate(request, authorization)
+    codes = identity.get("permission_codes") or []
+    if "evaluation:run" not in codes:
+        raise HTTPException(status_code=403, detail="需要 evaluation:run 权限")
+    return identity
+
+
 class RunBody(BaseModel):
     """触发初筛:单份或批量。方案A(闸门1):只收 resume_id,user_id 由后端权威派生。"""
 
@@ -43,7 +58,7 @@ class RunBody(BaseModel):
 @router.post("/admin/evaluation/run", status_code=202)
 async def run_evaluation_jobs(
     body: RunBody,
-    identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
 ) -> dict[str, Any]:
     """触发初筛(异步执行):返回 job_ids;结果落 evaluation_scorecard。"""
     try:
@@ -76,7 +91,7 @@ async def list_evaluation_jobs(
 
 @router.post("/admin/evaluation/jobs/retry")
 async def retry_failed_jobs(
-    identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
     cycle_id: int,
     include_stale: bool = False,
 ) -> dict[str, Any]:
