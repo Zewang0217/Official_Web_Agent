@@ -1,11 +1,15 @@
 """B2 执行组织(#126):进程内 asyncio task runner + job 状态表。
 
 - 触发:管理员手动(单/批量),POST /admin/evaluation/run → submit()
+- 方案A(评审闸门1):前端只认 resume_id,user_id/cycle_id 由后端权威派生,
+  开工前断言"按 user_id 查回的 resume == 本 job resume",防止错位操作。
 - 每 job 一个 asyncio task(信号量限并发,LLM 慢操作);状态全在
-  evaluation_job 表,进程重启后 running/pending 残留由 requeue_failed
-  手动恢复(B2 不做自动拾取——0 分队列/评审队列 UI 在 B6)
+  evaluation_job 表,进程重启后 pending/running 残留由启动自动恢复
+  (闸门3:lifespan 调 retry_stale 全量扫,超 10 分钟+attempts 未满才重排)
 - AI 0 分 = 初筛不过特殊标记:卡内 hard_zero 落列,不自动拒(#135)
 - 失败可重试:mark failed + requeue;审计走 agent_audit_log(#124 双录)
+- 题库线独立状态(闸门6):qbank_status=succeeded/failed/skipped,
+  评分成功题库失败 → job succeeded + qbank_status=failed,管理面可见。
 """
 
 from __future__ import annotations
@@ -27,8 +31,13 @@ _MAX_CONCURRENCY = 4
 
 @dataclass(frozen=True)
 class TriggerItem:
+    """初筛触发项。方案A(评审闸门1):只认 resume_id 一个事实源。
+
+    user_id 不再由前端携带——开工前由 fetch_resume_authority 从后端
+    按简历号派生权威归属,杜绝"A 标 6、B 被评分"的错位。
+    """
+
     resume_id: int
-    user_id: int
 
 
 def _write_eval_usage_log(
@@ -62,7 +71,7 @@ def _write_eval_usage_log(
 async def _set_resume_status(resume_id: int, status: int) -> None:
     """简历状态位(#用户反馈):6=AI初筛中(瞬态),结束回落 2。
 
-    走管理员 PUT /api/resumes/status/{id}/{status}(resume:audit,服务账号
+    走管理员 PUT /api/resumes/status/{id}/{status}(evaluation:run,服务账号
     可用);失败 fail-open——状态位缺失只影响展示,不影响初筛本身。"""
     try:
         client = await get_backend_client()
@@ -117,6 +126,33 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
     return resume_id, fields
 
 
+async def fetch_resume_authority(resume_id: int) -> dict:
+    """方案A:按简历号向后端取权威 user_id/cycle_id(闸门1)。
+
+    对应 Backend GET /api/resumes/admin/by-resume/{resumeId}(resume:view)。
+    只认 resume_id 一个事实源——前端不再传 user_id,这里派生:
+    - user_id:简历归属人(取数/审计用);
+    - cycle_id:简历所属周期。
+    返回后端 resumeId 必须 == 请求 resume_id,否则抛错(防错位)。
+    """
+    client = await get_backend_client()
+    data = await client.get(f"/api/resumes/admin/by-resume/{resume_id}")
+    resume_id_back = int(data.get("resumeId") or 0)
+    if resume_id_back != resume_id:
+        raise RuntimeError(
+            f"简历权威归属不一致:请求 resume_id={resume_id},后端返回 {resume_id_back}——"
+            "拒绝执行,防错位操作"
+        )
+    user_id = int(data.get("userId") or 0)
+    if user_id <= 0:
+        raise RuntimeError(f"后端未返回简历 {resume_id} 的归属 user_id,拒绝执行")
+    return {
+        "resume_id": resume_id,
+        "user_id": user_id,
+        "cycle_id": int(data.get("cycleId") or 0),
+    }
+
+
 class EvaluationRunner:
     """进程内单例:提交/并发控制/重试。状态真源在 evaluation_job 表。"""
 
@@ -135,9 +171,15 @@ class EvaluationRunner:
     ) -> list[int]:
         if not items:
             return []
+        # 方案A(闸门1):前端只给 resume_id,user_id 由后端按简历号权威派生。
+        # 逐个核对返回的 resumeId == 请求 resume_id,不一致抛错(batch 全拒)。
+        authoritative: list[tuple[int, int]] = []
+        for item in items:
+            authority = await fetch_resume_authority(item.resume_id)
+            authoritative.append((authority["resume_id"], authority["user_id"]))
         job_ids = await asyncio.to_thread(
             evaluation.create_jobs,
-            [(i.resume_id, i.user_id) for i in items],
+            authoritative,
             cycle_id,
         )
         # 先派发后审计:审计失败不得让已建的 job 永远 pending(B2 E2E 实测)
@@ -170,12 +212,25 @@ class EvaluationRunner:
             return
         async with self._sem:
             await asyncio.to_thread(evaluation.mark_job, job_id, "running")
+            resume_id = int(job["resume_id"])
             # 用户反馈:简历状态加「AI初筛中」(瞬态 6),结束后回落 2——
-            # 否则触发了初筛但状态无变化,让人困惑
-            await _set_resume_status(job["resume_id"], 6)
+            # 否则触发了初筛但状态无变化,让人困惑。
+            # 注意:6 与回 2 只作用于权威 resume_id,不会误改别的简历。
+            await _set_resume_status(resume_id, 6)
             card: dict | None = None
+            version: int | None = None
+            qbank_status = "skipped"
             try:
-                resume_id, fields = await fetch_scoring_fields(job["user_id"], cycle_id)
+                fetched_resume_id, fields = await fetch_scoring_fields(
+                    job["user_id"], cycle_id
+                )
+                # 闸门1 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
+                # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
+                if fetched_resume_id != resume_id:
+                    raise RuntimeError(
+                        f"简历归属错位:job resume_id={resume_id},"
+                        f"后端按 user_id={job['user_id']} 返回 {fetched_resume_id}——拒绝评分"
+                    )
                 card = await run_evaluation(
                     [
                         {
@@ -196,9 +251,9 @@ class EvaluationRunner:
                     cycle_id=cycle_id,
                     prompt_version=_prompt_version(),
                 )
-                # 调查 bundle → qbank(与评分同任务完成;失败不拖垮评分结果)
-                # D17/#149:GITHUB_TOKEN 从 settings 传参;github_key 从候选
-                # 档案取,接通评测线(错因追问)
+                # 调查 bundle → qbank:题库线失败不再静默(闸门6 qbank_status),
+                # job 记 succeeded + qbank_status=failed——评分卡有效,题库缺失
+                # 管理面可见、可单独重试。
                 try:
                     from official_agent.evaluation import bundle as eval_bundle
                     from official_agent.state import qbank as qbank_store
@@ -222,6 +277,7 @@ class EvaluationRunner:
                         envelope=envelope,
                         prompt_version=str(envelope.get("prompt_version", "")),
                     )
+                    qbank_status = "succeeded"
                     # D9/#154:探索+出题用量进 conversation_log(evaluation 通道,
                     # 关联 job;复用 M6 #113 四列管道,不新建表)
                     usage_total = envelope.get("explore_usage_total") or {}
@@ -235,25 +291,32 @@ class EvaluationRunner:
                         usage=usage_total,
                     )
                 except Exception:  # noqa: BLE001 — 题库线失败不拖垮评分卡
+                    qbank_status = "failed"
                     logging.getLogger(__name__).warning(
-                        "调查 bundle 落库失败(job=%s)", job_id, exc_info=True
+                        "调查 bundle 落库失败(job=%s),job qbank_status=failed",
+                        job_id,
+                        exc_info=True,
                     )
                 await asyncio.to_thread(
                     evaluation.mark_job,
                     job_id,
                     "succeeded",
                     card_version=version,
+                    qbank_status=qbank_status,
                 )
-                await _set_resume_status(resume_id, 2)
             except Exception as exc:  # noqa: BLE001 — job 失败落表,可重试
+                await _set_resume_status(resume_id, 2)
                 await asyncio.to_thread(
                     evaluation.mark_job,
                     job_id,
                     "failed",
                     error=f"{type(exc).__name__}: {exc}"[:500],
+                    qbank_status=qbank_status,
                 )
-                await _set_resume_status(job["resume_id"], 2)
                 return
+            # 6 是瞬态:成功路径在审计前回落 2(失败路径已回落),
+            # 否则简历永久卡"初筛中"(闸门3)。
+            await _set_resume_status(resume_id, 2)
             # 完成审计在保护段外:审计失败不得把已 succeeded 的 job 翻成 failed
             try:
                 await asyncio.to_thread(
@@ -268,6 +331,7 @@ class EvaluationRunner:
                         "cycle_id": cycle_id,
                         "candidate_user_id": job["user_id"],
                         "hard_zero": bool(card.get("hard_zero")) if card else None,
+                        "qbank_status": qbank_status,
                     },
                     decision="system:auto",
                     result=(
@@ -289,12 +353,26 @@ class EvaluationRunner:
             self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=0))
         return job_ids
 
-
     async def retry_stale(self, cycle_id: int) -> list[int]:
-        """残留恢复:failed + 超时限的 pending/running 全部重回 pending 并派发。"""
+        """残留恢复:超时限的 failed/pending/running 未超上限 job 回 pending 并派发。
+
+        闸门3:启动时与手动(include_stale)共用;attempts 达上限的 job 不重排。
+        """
         job_ids = await asyncio.to_thread(evaluation.requeue_stale, cycle_id)
         for job_id in job_ids:
             self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=0))
+        return job_ids
+
+    async def recover_stale_on_startup(self) -> list[int]:
+        """闸门3 启动自动恢复:全量扫残留(不限周期),重派未超上限的僵 job。
+
+        requeue_stale 需要 cycle_id;启动时对数据库里所有活跃 j 调用。
+        """
+        job_ids = await asyncio.to_thread(
+            evaluation.requeue_stale_all_cycles,
+        )
+        for job_id in job_ids:
+            self._spawn(self._run_job(job_id, 0, trigger_user_id=0))
         return job_ids
 
 

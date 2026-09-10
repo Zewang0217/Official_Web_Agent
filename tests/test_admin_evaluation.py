@@ -66,7 +66,7 @@ def test_evaluation_rejects_without_resume_audit(
     resp = client.post(
         "/api/agent/admin/evaluation/run",
         headers=_AUTH,
-        json={"cycle_id": 2026, "items": [{"resume_id": 1, "user_id": 7}]},
+        json={"cycle_id": 2026, "items": [{"resume_id": 1}]},
     )
     assert resp.status_code == 403
     assert "resume:audit" in resp.json()["detail"]
@@ -84,7 +84,7 @@ def test_evaluation_run_submits_jobs(
         async def submit(self, cycle_id, items, *, trigger_user_id):
             captured.update(
                 cycle_id=cycle_id,
-                items=[(i.resume_id, i.user_id) for i in items],
+                items=[i.resume_id for i in items],
                 trigger_user_id=trigger_user_id,
             )
             return [1, 2]
@@ -95,13 +95,13 @@ def test_evaluation_run_submits_jobs(
         headers=_AUTH,
         json={
             "cycle_id": 2026,
-            "items": [{"resume_id": 11, "user_id": 101}, {"resume_id": 12, "user_id": 102}],
+            "items": [{"resume_id": 11}, {"resume_id": 12}],
         },
     )
     assert resp.status_code == 202
     assert resp.json() == {"job_ids": [1, 2], "submitted": 2}
     assert captured["cycle_id"] == 2026
-    assert captured["items"] == [(11, 101), (12, 102)]
+    assert captured["items"] == [11, 12]
     assert captured["trigger_user_id"] == 1  # 触发人进审计
 
 

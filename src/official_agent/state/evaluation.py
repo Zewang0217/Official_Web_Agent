@@ -4,6 +4,7 @@
   (后端多人打分是真人票,#216 对齐)
 - 重跑版本递增:UNIQUE (resume_id, cycle_id, card_version),旧版可回看
 - 卡态:draft(默认)→ adopted/rejected(B6 评审队列迁移)
+- job 面(B2):幂等创建(闸门2)+ 启动自动恢复(闸门3)+ qbank 独立状态(闸门6)
 
 表自举 L-1 先例:DDL 进仓库,幂等;调用方管理事务(threads.py 风格)。
 """
@@ -19,6 +20,9 @@ from psycopg.rows import dict_row
 from official_agent.config import get_settings
 
 _STATUS_DRAFT = "draft"
+# job 自动重试上限(评审闸门3):对齐 tools/client 的 _MAX_ATTEMPTS;
+# 超过即标 failed 并停止自动重排,交人工队列。
+_MAX_ATTEMPTS = 3
 
 
 def _conn() -> psycopg.Connection[dict[str, Any]]:
@@ -162,9 +166,21 @@ def ensure_evaluation_job_table(conn: psycopg.Connection[dict[str, Any]]) -> Non
             attempts    int         NOT NULL DEFAULT 0,
             error       text,
             card_version int,
+            qbank_status text,
             created_at  timestamptz NOT NULL DEFAULT now(),
             updated_at  timestamptz NOT NULL DEFAULT now()
         )
+        """
+    )
+    # 旧库自举:qbank_status 列对已存在表补加(闸门6)
+    conn.execute(
+        "ALTER TABLE evaluation_job ADD COLUMN IF NOT EXISTS qbank_status text"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_eval_job_active_updated
+        ON evaluation_job (updated_at)
+        WHERE status IN ('pending', 'running')
         """
     )
     conn.execute(
@@ -173,21 +189,88 @@ def ensure_evaluation_job_table(conn: psycopg.Connection[dict[str, Any]]) -> Non
     )
 
 
+def ensure_evaluation_job_integrity(conn: psycopg.Connection[dict[str, Any]]) -> None:
+    """闸门2 加固(启动时调用一次):去重活跃 job + 建部分唯一索引。
+
+    与 ensure_evaluation_job_table 分开的原因:
+    - 去重是 O(表) 的 UPDATE,不该每次 DB 操作都跑;
+    - CREATE UNIQUE INDEX 在旧库存在重复活跃 job 时会直接失败,必须先去重;
+    - create_jobs 自身用 SELECT-first + savepoint 保证正确性,
+      本索引只是防御性兜底(并发竞态的最后一道闸)。
+    """
+    # 保留每 (resume_id, cycle_id) 最新的活跃 job,其余落 failed
+    conn.execute(
+        """
+        UPDATE evaluation_job SET status = 'failed',
+            error = COALESCE(error, '') || ' [启动去重:同简历存在更新的活跃 job]',
+            updated_at = now()
+        WHERE status IN ('pending', 'running')
+          AND job_id NOT IN (
+              SELECT MAX(job_id) FROM evaluation_job
+              WHERE status IN ('pending', 'running')
+              GROUP BY resume_id, cycle_id
+          )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_eval_job_active_resume
+        ON evaluation_job (resume_id, cycle_id)
+        WHERE status IN ('pending', 'running')
+        """
+    )
+
+
 def create_jobs(items: list[tuple[int, int]], cycle_id: int) -> list[int]:
-    """每份简历一行 pending job。items = [(resume_id, user_id), ...]。"""
+    """每份简历一行 job;幂等(闸门2):同 (resume, cycle) 已有活跃 job → 返回已有 job_id。
+
+    终态(succeeded/failed)不拦——复评是合法操作(新版本卡);活跃才去重。
+    SELECT-first:先查活跃 job,有则直接复用;无则 INSERT。
+    INSERT 用 savepoint 包裹,撞唯一键(uq_eval_job_active_resume,
+    并发下另一请求已插入)时回滚 savepoint 读回已有 job,事务不因
+    UniqueViolation 进入 aborted 状态。
+    """
     ids: list[int] = []
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
         for resume_id, user_id in items:
-            row = conn.execute(
-                """
-                INSERT INTO evaluation_job (resume_id, user_id, cycle_id)
-                VALUES (%s, %s, %s) RETURNING job_id
-                """,
-                (resume_id, user_id, cycle_id),
+            existing = conn.execute(
+                "SELECT job_id FROM evaluation_job "
+                "WHERE resume_id = %s AND cycle_id = %s "
+                "AND status IN ('pending', 'running') "
+                "ORDER BY job_id DESC LIMIT 1",
+                (resume_id, cycle_id),
             ).fetchone()
-            if row:
-                ids.append(int(row["job_id"]))
+            if existing:
+                ids.append(int(existing["job_id"]))
+                continue
+            try:
+                with conn.transaction(savepoint=True):
+                    row = conn.execute(
+                        """
+                        INSERT INTO evaluation_job (resume_id, user_id, cycle_id)
+                        VALUES (%s, %s, %s) RETURNING job_id
+                        """,
+                        (resume_id, user_id, cycle_id),
+                    ).fetchone()
+                    if row:
+                        ids.append(int(row["job_id"]))
+                        continue
+            except psycopg.errors.UniqueViolation:
+                pass  # 并发撞唯一键 → 读回已有活跃 job
+            existing = conn.execute(
+                "SELECT job_id FROM evaluation_job "
+                "WHERE resume_id = %s AND cycle_id = %s "
+                "AND status IN ('pending', 'running') "
+                "ORDER BY job_id DESC LIMIT 1",
+                (resume_id, cycle_id),
+            ).fetchone()
+            if existing:
+                ids.append(int(existing["job_id"]))
+            else:
+                raise RuntimeError(
+                    f"创建 job 失败且无活跃 job 可复用(resume={resume_id}, cycle={cycle_id})"
+                )
     return ids
 
 
@@ -197,8 +280,13 @@ def mark_job(
     *,
     error: str | None = None,
     card_version: int | None = None,
+    qbank_status: str | None = None,
 ) -> bool:
-    """状态迁移(pending→running→succeeded/failed;failed 可重试回 pending)。"""
+    """状态迁移(pending→running→succeeded/failed;failed 可重试回 pending)。
+
+    qbank_status(闸门6):题库线独立完成态——succeeded/failed/skipped。
+    job 终态 succeeded 但 qbank_status=failed 时,管理面可见"有评分无题库"。
+    """
     if status not in ("pending", "running", "succeeded", "failed"):
         raise ValueError(f"非法 job 状态:{status!r}")
     # attempts 语义=实际执行次数:只在进入 running 时累加(B2 评审 P2)
@@ -209,10 +297,11 @@ def mark_job(
             f"""
             UPDATE evaluation_job
             SET status = %s, error = %s, card_version = %s,
+                qbank_status = %s,
                 updated_at = now(){bump}
             WHERE job_id = %s
             """,
-            (status, error, card_version, job_id),
+            (status, error, card_version, qbank_status, job_id),
         )
         return cur.rowcount > 0
 
@@ -222,7 +311,7 @@ def get_job(job_id: int) -> dict[str, Any] | None:
         ensure_evaluation_job_table(conn)
         row = conn.execute(
             "SELECT job_id, resume_id, user_id, cycle_id, status, attempts, error, "
-            "card_version, created_at, updated_at "
+            "card_version, qbank_status, created_at, updated_at "
             "FROM evaluation_job WHERE job_id = %s",
             (job_id,),
         ).fetchone()
@@ -240,7 +329,7 @@ def list_jobs(cycle_id: int, *, status: str | None = None) -> list[dict[str, Any
         ensure_evaluation_job_table(conn)
         rows = conn.execute(
             "SELECT job_id, resume_id, user_id, cycle_id, status, attempts, error, "
-            "card_version, created_at, updated_at "
+            "card_version, qbank_status, created_at, updated_at "
             f"FROM evaluation_job WHERE {where} ORDER BY job_id DESC LIMIT 200",
             params,
         ).fetchall()
@@ -248,13 +337,16 @@ def list_jobs(cycle_id: int, *, status: str | None = None) -> list[dict[str, Any
 
 
 def requeue_failed(cycle_id: int) -> list[int]:
-    """失败 job 重回 pending(手动重试入口)。"""
+    """失败 job 重回 pending(手动重试入口)。
+
+    闸门3:attempts 达 _MAX_ATTEMPTS 的失败 job 不再自动重排(人工介入)。
+    """
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
         rows = conn.execute(
             "UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now() "
-            "WHERE cycle_id = %s AND status = 'failed' RETURNING job_id",
-            (cycle_id,),
+            "WHERE cycle_id = %s AND status = 'failed' AND attempts < %s RETURNING job_id",
+            (cycle_id, _MAX_ATTEMPTS),
         ).fetchall()
     return [int(r["job_id"]) for r in rows]
 
@@ -263,19 +355,69 @@ def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
     """残留恢复(进程重启后 pending/running 僵 job):超过时限才回 pending。
 
     时限防误伤:刚提交的 pending/running 有活任务在跑,重入队会双跑。
+    闸门3:attempts 达到 _MAX_ATTEMPTS 的 job 不再自动重排(标 failed 交人工),
+    避免死循环无限重试。
     """
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
+        # 1) 超限的僵 job 直接落 failed(error 标注),不进自动重排
+        conn.execute(
+            """
+            UPDATE evaluation_job SET status = 'failed',
+                error = COALESCE(error, '') || ' [attempts 超上限,转人工]',
+                updated_at = now()
+            WHERE cycle_id = %s AND status IN ('pending', 'running')
+              AND attempts >= %s
+              AND updated_at < now() - (%s || ' minutes')::interval
+            """,
+            (cycle_id, _MAX_ATTEMPTS, str(older_than_minutes)),
+        )
+        # 2) 未超限的僵 job 回 pending
         rows = conn.execute(
             """
             UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
             WHERE cycle_id = %s AND status IN ('failed', 'pending', 'running')
+              AND attempts < %s
               AND updated_at < now() - (%s || ' minutes')::interval
             RETURNING job_id
             """,
-            (cycle_id, str(older_than_minutes)),
+            (cycle_id, _MAX_ATTEMPTS, str(older_than_minutes)),
         ).fetchall()
     return [int(r["job_id"]) for r in rows]
+
+
+def requeue_stale_all_cycles(*, older_than_minutes: int = 10) -> list[dict[str, Any]]:
+    """闸门3 启动自动恢复:不限周期,把超时限的僵 job 全部回 pending。
+
+    返回 job_id + cycle_id 供派发;attempts 达上限的落 failed 交人工。
+    """
+    with _conn() as conn:
+        ensure_evaluation_job_table(conn)
+        # 超限僵 job 落 failed(不进自动重排)
+        conn.execute(
+            """
+            UPDATE evaluation_job SET status = 'failed',
+                error = COALESCE(error, '') || ' [attempts 超上限,转人工]',
+                updated_at = now()
+            WHERE status IN ('pending', 'running')
+              AND attempts >= %s
+              AND updated_at < now() - (%s || ' minutes')::interval
+            """,
+            (_MAX_ATTEMPTS, str(older_than_minutes)),
+        )
+        # 未超限僵 job 回 pending
+        rows = conn.execute(
+            """
+            UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
+            WHERE status IN ('failed', 'pending', 'running')
+              AND attempts < %s
+              AND updated_at < now() - (%s || ' minutes')::interval
+            RETURNING job_id, cycle_id
+            """,
+            (_MAX_ATTEMPTS, str(older_than_minutes)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
 
 def list_review_queue(cycle_id: int, queue: str = "all") -> list[dict[str, Any]]:
     """评审队列投影(#128):每简历最新卡 + 关联 user_id(勾选重评需要,#154)。

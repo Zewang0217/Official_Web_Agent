@@ -33,7 +33,7 @@ async def _require_resume_audit(
 
 
 class RunBody(BaseModel):
-    """触发初筛:单份或批量。items 元素含 resume_id/user_id(取简历走后者)。"""
+    """触发初筛:单份或批量。方案A(闸门1):只收 resume_id,user_id 由后端权威派生。"""
 
     cycle_id: int = Field(ge=1)
     items: list[eval_runner.TriggerItem] = Field(min_length=1, max_length=200)
@@ -48,9 +48,12 @@ async def run_evaluation_jobs(
     try:
         job_ids = await eval_runner.get_runner().submit(
             body.cycle_id,
-            [eval_runner.TriggerItem(i.resume_id, i.user_id) for i in body.items],
+            list(body.items),  # TriggerItem 只含 resume_id
             trigger_user_id=int(identity.get("user_id") or 0),
         )
+    except RuntimeError as exc:
+        # 方案A(闸门1):权威归属核对失败属调用方数据错位 → 400,不是服务端故障
+        raise HTTPException(status_code=400, detail=f"简历归属核对失败:{exc}") from exc
     except Exception as exc:  # noqa: BLE001 — 统一 500 固定文案
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
     return {"job_ids": job_ids, "submitted": len(job_ids)}

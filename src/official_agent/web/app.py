@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -45,7 +46,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_audit_table()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
+        # 闸门3 启动自动恢复:进程重启后,PG 里残留的 pending/running job
+        # 由 lifespan 全量扫回并重派(超 10 分钟 + attempts 未满;达上限的
+        # 转 failed 交人工)。失败 fail-open——PG 未起时跳过,下次重启再恢复。
+        try:
+            from official_agent.evaluation.runner import get_runner
 
+            await get_runner().recover_stale_on_startup()
+        except Exception:  # noqa: BLE001 — 恢复失败不挡服务启动(ADR-0005 fail-open)
+            logging.getLogger(__name__).warning(
+                "启动自动恢复失败,残留 job 留待下次/手动重试", exc_info=True
+            )
         # #164:挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
         purge_stop = asyncio.Event()
 
