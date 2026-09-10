@@ -92,6 +92,8 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
 
     def _mark(job_id, status, **kw):
         seen.setdefault("marks", []).append(status)
+        if kw:
+            print("MARK KW:", kw)
         return True
 
     async def _fetch_github(user_id):
@@ -99,9 +101,18 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
 
     async def _bundle(fields, **kw):
         seen["bundle_kwargs"] = kw
-        return {"groups": [], "prompt_version": "t"}
+        return {
+            "schema_name": "evaluation_qbank/v2",
+            "groups": [],
+            "prompt_version": "t",
+        }
 
     runner = EvaluationRunner()
+    status_calls: list = []
+
+    async def _fake_status(resume_id, status):
+        status_calls.append((resume_id, status))
+
     with (
         patch.object(ev_runner, "fetch_scoring_fields", _fetch),
         patch.object(ev_runner, "run_evaluation", _run_evaluation),
@@ -110,12 +121,15 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
         patch.object(
             ev_runner.evaluation,
             "get_job",
-            lambda jid: {"job_id": jid, "user_id": 42},
+            lambda jid: {"job_id": jid, "user_id": 42, "resume_id": 99},
         ),
         patch.object(ev_runner.audit, "write_audit", lambda **k: None),
         patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
         patch.object(ev_runner, "fetch_candidate_github", _fetch_github),
+        patch.object(ev_runner, "_set_resume_status", _fake_status),
         patch("official_agent.evaluation.bundle.run_bundle", _bundle),
+        patch("official_agent.state.qbank.save_qbank", lambda **k: 3),
+        patch("official_agent.state.conversation.write_conversation", lambda **k: None),
     ):
         await runner._run_job(1, 2026, trigger_user_id=9)
     assert seen["marks"] == ["running", "succeeded"]
@@ -143,7 +157,7 @@ async def test_run_job_failure_marks_failed(monkeypatch) -> None:
         patch.object(
             ev_runner.evaluation,
             "get_job",
-            lambda jid: {"job_id": jid, "user_id": 42},
+            lambda jid: {"job_id": jid, "user_id": 42, "resume_id": 99},
         ),
         patch.object(ev_runner.evaluation, "mark_job", _mark),
         patch.object(ev_runner.audit, "write_audit", lambda **k: None),
@@ -226,7 +240,7 @@ async def test_failure_marks_full_timeline_and_audits() -> None:
         patch.object(
             ev_runner.evaluation,
             "get_job",
-            lambda jid: {"job_id": jid, "user_id": 42},
+            lambda jid: {"job_id": jid, "user_id": 42, "resume_id": 99},
         ),
         patch.object(
             ev_runner.evaluation,
@@ -288,7 +302,9 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
     monkeypatch.setattr(ev_runner.evaluation, "save_scorecard", lambda *a, **k: 1)
     monkeypatch.setattr(ev_runner.evaluation, "mark_job", lambda *a, **k: True)
     monkeypatch.setattr(
-        ev_runner.evaluation, "get_job", lambda jid: {"job_id": jid, "user_id": 42}
+        ev_runner.evaluation,
+        "get_job",
+        lambda jid: {"job_id": jid, "user_id": 42, "resume_id": 99},
     )
     monkeypatch.setattr(ev_runner.audit, "write_audit", lambda **k: None)
     monkeypatch.setattr(ev_runner.asyncio, "to_thread", _fake_to_thread([]))
