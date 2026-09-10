@@ -42,12 +42,14 @@ model: strong
 ## 态度判定(attitude;#157 决议 §3:全卡风险最高的输出,三要素缺一不可)
 - verdict 取值:sincere(整体认真)/ perfunctory(整体敷衍——多维极简/套话模板,
   此时各维分压 ≤30)/ bad_faith(明确不端:骂人/侮辱/故意应付,此时各维给 0)。
-- **reason 三要素**:
+- **reason 三要素**(全部写进 reason 这**一个字段**):
   1. **跨维点名**:逐个 field_key 说哪些认真、哪些敷衍,禁笼统「整体」;
   2. **判定判据**:对照三档定义说清差在哪;
   3. **与分的关系**:压没压分、为什么。
 - bad_faith 的 reason 必须点名具体 field_key 并**引述原文**(校验会拒);
   单维弱不等于态度问题,看整体一致性。
+- **attitude 对象只允许 {"verdict", "reason"} 两个键**:不要发明
+  reason_evidence 等额外字段,引述一律写在 reason 文本内。
 
 ## 硬性要求
 1. 每个 dimension 的 evidence 必须从该维原文中**逐字摘一句**原文(不超过 60 字);
