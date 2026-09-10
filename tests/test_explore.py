@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from official_agent.evaluation import dossier as dossier_mod
@@ -408,3 +409,44 @@ def test_judge_report_schema_roundtrip() -> None:
 
     with pytest.raises(ValidationError):
         JudgeReport.model_validate(bad)
+
+
+@pytest.mark.asyncio
+async def test_qbank_probes_reject_match_mismatch_fails() -> None:
+    """reject 命中但 match 子串不匹配 → FAIL(评审 P2:分支锁定)。"""
+
+    from official_agent.evals import qbank_probes as qp
+
+    data = {
+        "fixtures": {"dossier": "d", "paths": []},
+        "cases": [
+            {
+                "id": "x",
+                "validate": "reject",
+                "match": "链层数越界",
+                "group": {
+                    "entry": {
+                        "category": "C1_背景与动机",
+                        "question": "q",
+                        "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                        "evidence": {"path": "", "note": ""},
+                        "time_minutes": 3,
+                    },
+                    "chains": [],
+                    "reserves": [],
+                },
+            }
+        ],
+    }
+    dst = tmp_path_fixtures(data)
+    result = await qp.run_suite(dst)
+    assert result.status == "FAIL"  # 拒绝原因与 match 不符 → FAIL
+
+
+def tmp_path_fixtures(data: dict, tmp_name: str = "qbank_probes.yaml") -> Path:
+    import tempfile
+
+    d = Path(tempfile.mkdtemp())
+    p = d / tmp_name
+    p.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
+    return p

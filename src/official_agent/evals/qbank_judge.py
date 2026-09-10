@@ -38,7 +38,16 @@ async def run_suite(path: Path, *, distribution: bool = False, **_: Any) -> Suit
 
     settings = get_effective_settings()
     model = build_model(settings, temperature=0.0)
-    report = await judge_qbank(dossier, group, model=model)
+    try:
+        report = await judge_qbank(dossier, group, model=model)
+    except Exception as exc:  # noqa: BLE001 — 报告模式:judge 崩不中止整个 eval run
+        return SuiteResult(
+            name=path.stem,
+            kind="qbank_judge",
+            source=path.name,
+            status="SKIP",
+            notes=[f"judge 执行失败(报告模式不阻塞): {type(exc).__name__}: {exc}"[:120]],
+        )
 
     cases = [
         CaseResult(

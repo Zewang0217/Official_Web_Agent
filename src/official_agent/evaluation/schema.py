@@ -10,7 +10,7 @@ strict 语义:extra="forbid" + 字段约束。输出轨为提示词 JSON + 本 s
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DimensionScore(BaseModel):
@@ -248,8 +248,6 @@ class JudgeReport(BaseModel):
 
     dimensions: list[JudgeDimensionScore] = Field(min_length=4, max_length=4)
     overall: str = ""
-
-    from pydantic import model_validator
 
     @model_validator(mode="after")
     def _four_distinct_dimensions(self) -> "JudgeReport":

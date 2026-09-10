@@ -73,6 +73,24 @@ cases:
             - { question: "太浅了。", expected_signal: "s" }
       reserves: *reserves
 
+  # ②' 链层数上界(6 层 → 拒)
+  - id: probe-chain-layers-max-rejected
+    validate: reject
+    match: ""  # schema max_length 拒绝,文案来自 pydantic
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers:
+            - { question: "L1?", expected_signal: "s" }
+            - { question: "L2?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+            - { question: "L4?", expected_signal: "s" }
+            - { question: "L5?", expected_signal: "s" }
+            - { question: "L6 超上界?", expected_signal: "s" }
+      reserves: *reserves
+
   # ③ 题量硬顶 15(入口 + 4 链 × 5 层 + 2 备选 = 23)
   - id: probe-total-cap-rejected
     validate: reject
