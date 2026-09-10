@@ -156,9 +156,7 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
     )
     monkeypatch.setattr(bd, "build_model", lambda *a, **k: fake_model)
 
-    envelope = await bd.run_bundle(
-        fields, resume_id=9, cycle_id=2026, github_key="usergithub"
-    )
+    envelope = await bd.run_bundle(fields, resume_id=9, cycle_id=2026, github_key="usergithub")
     groups = {g["group"]: g for g in envelope["groups"]}
     assert groups["repo"]["qbank_v2"]["mode"] == "skipped"  # #153:v2 信封嵌套
     assert "autograding" not in groups  # 无评测记录 → 线不存在
@@ -167,6 +165,7 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
     assert envelope["total_questions"] == len(fallback["questions"])
     assert sum(envelope["suggested_plan"]) <= 15
     assert fake_model.calls == 1  # 兜底线只调一次 LLM(技能题组)
+
 
 @pytest.mark.asyncio
 async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
@@ -195,9 +194,7 @@ async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
     )
     monkeypatch.setattr(bd, "build_model", lambda *a, **k: fake_model)
 
-    envelope = await bd.run_bundle(
-        fields, resume_id=11, cycle_id=2026, github_key="usergithub"
-    )
+    envelope = await bd.run_bundle(fields, resume_id=11, cycle_id=2026, github_key="usergithub")
     # 逐仓钉住调查,顺序=出现序
     assert called == [("me", "web"), ("me", "api")]
     repo_groups = [g for g in envelope["groups"] if g["group"] == "repo"]
@@ -279,9 +276,13 @@ async def test_bundle_aggregates_explore_usage(monkeypatch) -> None:
             "schema_name": "evaluation_qbank/v2",
             "repo_summary": "s",
             "group": {
-                "entry": {"category": "C1_背景与动机", "question": "q?",
-                          "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
-                          "evidence": {"path": "", "note": ""}, "time_minutes": 3},
+                "entry": {
+                    "category": "C1_背景与动机",
+                    "question": "q?",
+                    "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                    "evidence": {"path": "", "note": ""},
+                    "time_minutes": 3,
+                },
                 "chains": [],
                 "reserves": [],
             },

@@ -23,7 +23,6 @@ Langfuse 只读镜像;同步脚本待 prompt 体系落地后随 GRA 任务补。
 # payload 禁入 trace**——新增上报字段前必须先过 security/pii.py 出口
 # 契约表,缺一即红线。
 
-
 import contextvars
 import hashlib
 import logging
@@ -58,7 +57,9 @@ def _to_w3c_trace_id(value: str) -> str:
     v = value.lower()
     if not v or _HEX32_RE.fullmatch(v):
         return v
-    return hashlib.sha256(v.encode()).hexdigest()
+    # W3C trace-id 段必须 32 位 hex:sha256 截断前 32 位(OBS-02 复审补漏——
+    # 此前 hexdigest() 全长 64 位,严格消费端会丢弃非法头,对账失效)
+    return hashlib.sha256(v.encode()).hexdigest()[:32]
 
 
 def set_turn_trace_id(turn_id: str) -> contextvars.Token[str]:
@@ -148,3 +149,13 @@ def _build_handler(settings: Any) -> BaseCallbackHandler:
         host=settings.langfuse_host,
     )
     return CallbackHandler()
+
+
+def eval_job_trace_id(job_id: int) -> str:
+    """评测 job 的确定性 correlation id(#183)。
+
+    初筛 job 没有对话轮,用 job 身份派生稳定 W3C trace id:同一 job 在
+    Langfuse trace、出站 Backend 请求 traceparent、审计 trace_id、结构化
+    日志四面同 id,分钟级定位失败阶段(见 docs/eval-observability.md)。
+    """
+    return _to_w3c_trace_id(f"eval-job-{job_id}")

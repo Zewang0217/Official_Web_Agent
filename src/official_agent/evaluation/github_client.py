@@ -111,9 +111,7 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/contents/{quote(path.lstrip('/'))}", params=params
         )
         if isinstance(data, list):
-            children = [
-                str(item.get("path", "")) for item in data[:100] if isinstance(item, dict)
-            ]
+            children = [str(item.get("path", "")) for item in data[:100] if isinstance(item, dict)]
             return {"type": "dir", "path": path, "children": children}
         if not isinstance(data, dict):
             raise GitHubUnavailable("contents 响应结构异常")
@@ -200,9 +198,7 @@ class GitHubClient:
                 "sha": str(item.get("sha", "")),
                 "message": item.get("commit", {}).get("message", ""),
                 "date": item.get("commit", {}).get("author", {}).get("date", ""),
-                "author_login": str(
-                    (item.get("author") or {}).get("login", "")
-                ),
+                "author_login": str((item.get("author") or {}).get("login", "")),
             }
             for item in data
             if isinstance(item, dict)
@@ -318,9 +314,7 @@ class GitHubClient:
 
     async def commits(self, owner: str, repo: str, *, per_page: int = 30) -> list[dict]:
         """最近提交(message/date);空仓返回 []。"""
-        data = await self._get_json(
-            f"/repos/{owner}/{repo}/commits", params={"per_page": per_page}
-        )
+        data = await self._get_json(f"/repos/{owner}/{repo}/commits", params={"per_page": per_page})
         return [
             {
                 "message": item.get("commit", {}).get("message", ""),
@@ -346,11 +340,7 @@ class GitHubClient:
         )
         if not isinstance(data, dict):
             return [], False
-        paths = [
-            item["path"]
-            for item in data.get("tree", [])
-            if item.get("type") == "blob"
-        ]
+        paths = [item["path"] for item in data.get("tree", []) if item.get("type") == "blob"]
         truncated = bool(data.get("truncated")) or len(paths) > limit
         return paths[:limit], truncated
 

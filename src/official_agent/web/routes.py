@@ -171,9 +171,7 @@ async def chat(
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
     if len(message) > _MAX_MESSAGE_CHARS:
-        raise HTTPException(
-            status_code=400, detail=f"消息过长(上限 {_MAX_MESSAGE_CHARS} 字)"
-        )
+        raise HTTPException(status_code=400, detail=f"消息过长(上限 {_MAX_MESSAGE_CHARS} 字)")
     session_id = (body.get("session_id") or "").strip() or None
 
     session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
@@ -248,9 +246,8 @@ def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> Non
     )
     session.applied_config_fingerprint = current
 
-async def _compress_if_needed(
-    session: _SessionState, config: dict, user_query: str
-) -> str | None:
+
+async def _compress_if_needed(session: _SessionState, config: dict, user_query: str) -> str | None:
     """M6 #114:轮末检查会话 token,超阈值则压缩回写 checkpoint。
 
     回写 = update_state 产生 checkpoint **新版本**(先 REMOVE_ALL_MESSAGES
@@ -279,14 +276,10 @@ async def _compress_if_needed(
         settings = get_effective_settings()
         # 摘要用 strong 模型(ADR-0004「压缩即理解」,降 light 须 eval 证明);
         # 温度 0 + 输出预算 = reasoning-safe
-        summarizer = build_model(settings).bind(
-            temperature=0, max_tokens=SUMMARY_MAX_TOKENS
-        )
+        summarizer = build_model(settings).bind(temperature=0, max_tokens=SUMMARY_MAX_TOKENS)
         result = await maybe_compress(
             messages,
-            summarize_fn=lambda older, query: summarize_messages(
-                older, query, summarizer
-            ),
+            summarize_fn=lambda older, query: summarize_messages(older, query, summarizer),
             threshold=settings.context_compress_threshold_tokens,
             recent_keep=settings.context_recent_keep_messages,
             query=user_query,
@@ -320,9 +313,9 @@ async def _stream_turn(
     落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
     checkpointer:配置变更后重建 agent 需要(见 _ensure_fresh_agent_config)。
     """
+
     def sse(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
 
     # review P0-1:同会话并发轮次串行化——锁被占用时立即回 busy,
     # 不排队(前端提示「上一条还在回复中」);check/acquire 间无 await,原子。
@@ -516,9 +509,7 @@ async def _rewrite_last_ai_message(agent: Any, config: dict, final_reply: str) -
             config, {"messages": [RemoveMessage(id=last.id), AIMessage(content=final_reply)]}
         )
     except Exception:  # noqa: BLE001 — 回写失败不阻断 done
-        logging.getLogger(__name__).warning(
-            "编造守卫回写 checkpointer 失败(已忽略)", exc_info=True
-        )
+        logging.getLogger(__name__).warning("编造守卫回写 checkpointer 失败(已忽略)", exc_info=True)
 
 
 def _log_conversation(
@@ -578,6 +569,7 @@ def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
     from official_agent.state.conversation import prefix_hash as _impl
 
     return _impl(system_prompt, tool_names)
+
 
 # ── M6 #111 管理 API:配置热生效 ────────────────────────────────────────
 
@@ -683,6 +675,7 @@ async def put_admin_config(
     invalidate_settings_cache()
     return {"updated": list(body.keys())}
 
+
 def get_all_config() -> dict[str, str]:
     """读 agent_config 全部键值(lazy;模块级包装供测试 patch)。"""
     from official_agent.state.config_store import get_all_config as _impl
@@ -705,6 +698,7 @@ def invalidate_settings_cache() -> None:
 
 
 # ── M6 #112 管理 API:运营视图(对话列表/详情) ───────────────────────────
+
 
 def list_conversations(**kwargs: Any) -> list[dict[str, Any]]:
     """运营列表(lazy;模块级包装供测试 patch)。"""
@@ -753,6 +747,7 @@ async def get_admin_conversation_detail(
 
 
 # ── 会话管理(M6 #115 G1-G3):用户历史会话/回看,管理员按用户查看 ────────────
+
 
 def _project_messages(raw_messages: list) -> list[dict[str, str]]:
     """checkpointer 消息 → [{role, content}]:只保留 user/assistant 文本。
@@ -817,9 +812,7 @@ async def list_my_sessions(
             "channel": t.channel,
             "subject": t.subject,
             "created_at": t.created_at,
-            **overview.get(
-                t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}
-            ),
+            **overview.get(t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}),
         }
         for t in threads
     ]
@@ -872,9 +865,7 @@ async def get_admin_sessions(
             "channel": t.channel,
             "subject": t.subject,
             "created_at": t.created_at,
-            **overview.get(
-                t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}
-            ),
+            **overview.get(t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}),
         }
         for t in threads
     ]

@@ -130,8 +130,10 @@ async def finalize_hard(state: EvaluationState) -> dict:
 
 def _evidence_in(evidence: str, source: str) -> bool:
     """证据逐字性:归一空白后 evidence 必须是原文子串(B1 评审 P1-2)。"""
+
     def norm(s: str) -> str:
         return "".join(s.split())
+
     ev = norm(evidence)
     return bool(ev) and ev in norm(source)
 
@@ -163,9 +165,7 @@ async def llm_score(state: EvaluationState) -> dict:
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])
         raw = resp.content
         if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
-            raw = "".join(
-                b.get("text", "") for b in raw if isinstance(b, dict)
-            )
+            raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
         content = raw if isinstance(raw, str) else str(raw)
         result = ScorecardOutput.model_validate_json(_extract_json(content))
         # strict 后置校验(评审 P1):模型漏维/造维、证据非原文都属静默降级,
@@ -180,13 +180,9 @@ async def llm_score(state: EvaluationState) -> dict:
         sources = {f["field_key"]: f.get("value", "") for f in state["fields"]}
         for d in result.dimensions:
             if not _evidence_in(d.evidence, sources.get(d.field_key, "")):
-                raise ValueError(
-                    f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}"
-                )
+                raise ValueError(f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}")
         # #162 硬校验(#157 决议 §4):态度与分数的契约,违例翻 error 重试
-        if result.attitude.verdict == "bad_faith" and any(
-            d.score != 0 for d in result.dimensions
-        ):
+        if result.attitude.verdict == "bad_faith" and any(d.score != 0 for d in result.dimensions):
             raise ValueError("bad_faith 必须全维 0(模型给了非 0 分)")
         if result.attitude.verdict == "perfunctory" and any(
             d.score > 30 for d in result.dimensions
@@ -195,9 +191,7 @@ async def llm_score(state: EvaluationState) -> dict:
         if result.attitude.verdict == "bad_faith" and not any(
             fk in result.attitude.reason for fk in expected
         ):
-            raise ValueError(
-                "bad_faith reason 必须点名具体 field_key(#157 决议 §4)"
-            )
+            raise ValueError("bad_faith reason 必须点名具体 field_key(#157 决议 §4)")
         scores = {d.field_key: d.score for d in result.dimensions}
         card_total_zero = bool(scores) and all(s == 0 for s in scores.values())
         card = {
@@ -208,8 +202,7 @@ async def llm_score(state: EvaluationState) -> dict:
             "attitude": result.attitude.model_dump(),
             "total": weighted_total(scores, state.get("weights", {})),
             # AI 全 0 = 初筛不过同样落 hard_zero(B2 评审 P1:0 分队列靠它捞)
-            "hard_zero": card_total_zero
-            or result.attitude.verdict == "bad_faith",
+            "hard_zero": card_total_zero or result.attitude.verdict == "bad_faith",
             "hard_zero_reasons": (
                 {"_attitude": "AI 判定各维全 0,初筛不过"} if card_total_zero else {}
             ),

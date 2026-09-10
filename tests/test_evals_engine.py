@@ -40,9 +40,7 @@ def _make_tree(tmp_path: Path) -> Path:
     (tmp_path / "cases" / "foo.yaml").write_text(
         "runner: fake\ncases:\n  - id: x\n", encoding="utf-8"
     )
-    (tmp_path / "datasets" / "bar.yaml").write_text(
-        "runner: fake\nprobes: []\n", encoding="utf-8"
-    )
+    (tmp_path / "datasets" / "bar.yaml").write_text("runner: fake\nprobes: []\n", encoding="utf-8")
     return tmp_path
 
 

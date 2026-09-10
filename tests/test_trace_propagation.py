@@ -93,6 +93,8 @@ async def test_turn_id_fallback_without_span(monkeypatch) -> None:
     finally:
         reset_turn_trace_id(token)
 
-    want = hashlib.sha256(b"cli:u123:a1b2c3d4").hexdigest()
+    # #183:W3C trace-id 段必须是 32 位 hex——截断 sha256 前 32 位
+    # (旧实现发全长 64 位,严格消费端会丢弃非法头)
+    want = hashlib.sha256(b"cli:u123:a1b2c3d4").hexdigest()[:32]
     assert trace_ids_of([api_route, user_route]) == [want] * 2
     await client.aclose()

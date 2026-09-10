@@ -141,9 +141,7 @@ def test_require_confirmation_masks_summary(monkeypatch: pytest.MonkeyPatch) -> 
         captured.update(payload)
         return "approve"
 
-    monkeypatch.setattr(
-        "official_agent.tools.interrupt_guard.interrupt", _fake_interrupt
-    )
+    monkeypatch.setattr("official_agent.tools.interrupt_guard.interrupt", _fake_interrupt)
     from official_agent.tools.interrupt_guard import require_confirmation
 
     decision = require_confirmation("将把张三(13812345678)调剂到周六场次")

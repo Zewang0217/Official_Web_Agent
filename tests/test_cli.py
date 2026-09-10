@@ -81,9 +81,7 @@ def _login_ok(user_id: int = 7, role: str = "管理员") -> httpx.Response:
 
     claims = {"userId": user_id, "roleNames": [role], "permissionCodes": ["user:view"]}
     token = f"{b64(b'{}')}.{b64(json.dumps(claims).encode())}.sig"
-    return httpx.Response(
-        200, json={"code": 200, "message": "ok", "data": {"token": token}}
-    )
+    return httpx.Response(200, json={"code": 200, "message": "ok", "data": {"token": token}})
 
 
 def _install_mock_backend() -> None:
@@ -288,8 +286,7 @@ def test_chat_first_round_failure_message_face_stays_user_only(
     msgs = seen_inputs[0]
     # 消息面只有用户原文:无身份前缀(否则回看泄漏)、含本轮输入
     assert not any(
-        getattr(m, "type", "") == "human" and "当前对话用户" in str(m.content)
-        for m in msgs
+        getattr(m, "type", "") == "human" and "当前对话用户" in str(m.content) for m in msgs
     )
     assert any("第二问" in str(m.content) for m in msgs)
     readonly.set_backend_client(None)
@@ -308,12 +305,28 @@ def test_run_turn_accumulates_history_and_shows_tool_flow(monkeypatch: pytest.Mo
             assert stream_mode == ["messages", "updates"]
             yield "messages", (AIMessageChunk(content="查询中"), {})
             # 三节点各吐增量(model→tools→model),对齐真实图契约
-            yield "updates", {"agent": {"messages": [
-                AIMessage("", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "c1"}]),
-            ]}}
-            yield "updates", {"tools": {"messages": [
-                ToolMessage("{'cycleId': 2}", tool_call_id="c1", name="get_open_cycle"),
-            ]}}
+            yield (
+                "updates",
+                {
+                    "agent": {
+                        "messages": [
+                            AIMessage(
+                                "", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "c1"}]
+                            ),
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage("{'cycleId': 2}", tool_call_id="c1", name="get_open_cycle"),
+                        ]
+                    }
+                },
+            )
             yield "updates", {"agent": {"messages": [AIMessage("当前 1 个开放周期。")]}}
 
     async def go() -> list:
@@ -370,9 +383,7 @@ def test_run_turn_buffer_reply_guards_fabrication() -> None:
     monkeypatch: pytest.MonkeyPatch = pytest.MonkeyPatch()
     try:
         monkeypatch.setattr(cli_mod, "console", test_console)
-        out = asyncio.run(
-            cli_mod._run_turn(FakeToolless(), history, "s1", [], buffer_reply=True)
-        )
+        out = asyncio.run(cli_mod._run_turn(FakeToolless(), history, "s1", [], buffer_reply=True))
     finally:
         monkeypatch.undo()
     printed = buf.getvalue()

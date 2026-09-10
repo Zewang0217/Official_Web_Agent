@@ -48,8 +48,12 @@ def _tree(tmp_path: Path) -> Path:
 
 def _ns(**kwargs: object) -> argparse.Namespace:
     defaults = dict(
-        only=None, suite=None, distribution=False, baseline=None,
-        write_baseline=None, json=None,
+        only=None,
+        suite=None,
+        distribution=False,
+        baseline=None,
+        write_baseline=None,
+        json=None,
     )
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -62,9 +66,7 @@ async def test_write_then_regress_baseline_gate_fails(tmp_path: Path) -> None:
     baseline_path = tmp_path / "baselines.json"
 
     # ① 写基线:产物是 {recorded_at, suites} 包装,里面含本次指标
-    rc = await mod._run(
-        _ns(write_baseline=baseline_path), evals_dir=tree, registry=registry
-    )
+    rc = await mod._run(_ns(write_baseline=baseline_path), evals_dir=tree, registry=registry)
     assert rc == 0
     payload = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert "suites" in payload and "recall_at_3" in payload["suites"]["foo"]["metrics"]

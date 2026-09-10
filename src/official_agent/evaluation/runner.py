@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from dataclasses import dataclass
 
 from official_agent.config import get_effective_settings
@@ -66,6 +67,19 @@ def _write_eval_usage_log(
         )
     except Exception:  # noqa: BLE001 — 用量日志缺失可容忍
         logging.getLogger(__name__).warning("eval 用量日志写入失败", exc_info=True)
+
+
+def _log_event(job_id: int, cycle_id: int, resume_id: int, stage: str, **fields: object) -> None:
+    """评测线结构化事件日志(#183):单行 key=value,分钟级定位失败阶段。
+
+    只记 id/阶段/耗时/版本/错误类别,绝不落简历原文或 PII;trace id 由
+    job 级 turn-trace(set in _run_job)进 traceparent 与 Langfuse,
+    与本行同源可关联。"""
+    parts = [f"eval_event stage={stage} job_id={job_id} cycle_id={cycle_id}"]
+    for k, v in fields.items():
+        if v is not None:
+            parts.append(f"{k}={v}")
+    logging.getLogger(__name__).info(" ".join(parts) + f" resume_id={resume_id}")
 
 
 async def _set_resume_status(resume_id: int, status: int) -> None:
@@ -269,12 +283,36 @@ class EvaluationRunner:
         return job_ids
 
     async def _run_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
+        from official_agent.observability import (
+            eval_job_trace_id,
+            reset_turn_trace_id,
+            set_turn_trace_id,
+        )
+
+        # #183:job 级 correlation id——Langfuse trace、出站 Backend 请求
+        # traceparent、审计 trace_id、结构化日志四面同 id(确定性可复算)。
+        trace_token = set_turn_trace_id(eval_job_trace_id(job_id))
+        try:
+            await self._execute_job(job_id, cycle_id, trigger_user_id=trigger_user_id)
+        finally:
+            reset_turn_trace_id(trace_token)
+
+    async def _execute_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
+        started = time.monotonic()
         job = await asyncio.to_thread(evaluation.get_job, job_id)
         if job is None:
             return
         async with self._sem:
             await asyncio.to_thread(evaluation.mark_job, job_id, "running")
             resume_id = int(job["resume_id"])
+            _log_event(
+                job_id,
+                cycle_id,
+                resume_id,
+                "started",
+                attempts=int(job.get("attempts") or 0),
+                model=get_effective_settings().model_strong,
+            )
             # 用户反馈:简历状态加「AI初筛中」(瞬态 6),结束后回落 2——
             # 否则触发了初筛但状态无变化,让人困惑。
             # 注意:6 与回 2 只作用于权威 resume_id,不会误改别的简历。
@@ -283,6 +321,7 @@ class EvaluationRunner:
             version: int | None = None
             qbank_status = "skipped"
             try:
+                t_eval = time.monotonic()
                 fetched_resume_id, fields = await fetch_scoring_fields(job["user_id"], cycle_id)
                 # 闸门1 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
                 # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
@@ -313,9 +352,19 @@ class EvaluationRunner:
                     cycle_id=cycle_id,
                     prompt_version=_prompt_version(),
                 )
+                _log_event(
+                    job_id,
+                    cycle_id,
+                    resume_id,
+                    "scorecard_saved",
+                    card_version=version,
+                    duration_ms=int((time.monotonic() - t_eval) * 1000),
+                    prompt_version=_prompt_version(),
+                )
                 # 调查 bundle → qbank:题库线失败不再静默(闸门6 qbank_status),
                 # job 记 succeeded + qbank_status=failed——评分卡有效,题库缺失
                 # 管理面可见、可单独重试。
+                t_qbank = time.monotonic()
                 try:
                     from official_agent.evaluation import bundle as eval_bundle
                     from official_agent.state import qbank as qbank_store
@@ -354,10 +403,29 @@ class EvaluationRunner:
                     )
                 except Exception:  # noqa: BLE001 — 题库线失败不拖垮评分卡
                     qbank_status = "failed"
+                    _log_event(
+                        job_id,
+                        cycle_id,
+                        resume_id,
+                        "qbank_done",
+                        status="failed",
+                        duration_ms=int((time.monotonic() - t_qbank) * 1000),
+                        error_class="bundle_failed",
+                    )
                     logging.getLogger(__name__).warning(
                         "调查 bundle 落库失败(job=%s),job qbank_status=failed",
                         job_id,
                         exc_info=True,
+                    )
+                else:
+                    _log_event(
+                        job_id,
+                        cycle_id,
+                        resume_id,
+                        "qbank_done",
+                        status="succeeded",
+                        qbank_version=qbank_version,
+                        duration_ms=int((time.monotonic() - t_qbank) * 1000),
                     )
                 await asyncio.to_thread(
                     evaluation.mark_job,
@@ -375,7 +443,25 @@ class EvaluationRunner:
                     error=f"{type(exc).__name__}: {exc}"[:500],
                     qbank_status=qbank_status,
                 )
+                _log_event(
+                    job_id,
+                    cycle_id,
+                    resume_id,
+                    "failed",
+                    error_class=type(exc).__name__,
+                    attempts=int(job.get("attempts") or 0) + 1,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
                 return
+            _log_event(
+                job_id,
+                cycle_id,
+                resume_id,
+                "succeeded",
+                card_version=version,
+                qbank_status=qbank_status,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             # 6 是瞬态:成功路径在审计前回落 2(失败路径已回落),
             # 否则简历永久卡"初筛中"(闸门3)。
             await _set_resume_status(resume_id, 2)

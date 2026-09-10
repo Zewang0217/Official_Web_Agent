@@ -86,9 +86,7 @@ def _sniff_kind(data: Any) -> str:
         and "expected_tools" in data[0]
     ):
         return "tool_selection"  # 早期裸列表格式
-    raise ValueError(
-        "suite 文件缺少顶层 runner: 字段且结构无法识别(新 suite 必须显式声明 runner:)"
-    )
+    raise ValueError("suite 文件缺少顶层 runner: 字段且结构无法识别(新 suite 必须显式声明 runner:)")
 
 
 def discover_suites(evals_dir: Path) -> list[SuiteRef]:
@@ -124,12 +122,8 @@ def default_registry() -> dict[str, SuiteSpec]:
         "injection_probes": SuiteSpec(
             run=injection_probes.run_suite, env_blocker=injection_probes.env_blocker
         ),
-        "qbank_probes": SuiteSpec(
-            run=qbank_probes.run_suite, env_blocker=qbank_probes.env_blocker
-        ),
-        "qbank_judge": SuiteSpec(
-            run=qbank_judge.run_suite, env_blocker=qbank_judge.env_blocker
-        ),
+        "qbank_probes": SuiteSpec(run=qbank_probes.run_suite, env_blocker=qbank_probes.env_blocker),
+        "qbank_judge": SuiteSpec(run=qbank_judge.run_suite, env_blocker=qbank_judge.env_blocker),
     }
 
 
@@ -152,9 +146,7 @@ def _apply_baseline(result: SuiteResult, baseline_entry: dict[str, Any]) -> None
             result.notes.append(f"基线指标 {key} 本次未产出(可能已改名),跳过对比")
             continue
         if cur < float(base_value):
-            result.notes.append(
-                f"REGRESSION: {key}={cur:.3f} < 基线 {float(base_value):.3f}"
-            )
+            result.notes.append(f"REGRESSION: {key}={cur:.3f} < 基线 {float(base_value):.3f}")
             result.status = "FAIL"
 
 
@@ -237,9 +229,7 @@ def dump_json(results: list[SuiteResult]) -> dict[str, Any]:
                 "status": r.status,
                 "pass_rate": r.pass_rate,
                 "metrics": r.metrics,
-                "cases": [
-                    {"id": c.id, "passed": c.passed, "detail": c.detail} for c in r.cases
-                ],
+                "cases": [{"id": c.id, "passed": c.passed, "detail": c.detail} for c in r.cases],
                 "notes": r.notes,
             }
         )

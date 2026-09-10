@@ -36,9 +36,7 @@ def extract_failures(submission: dict) -> list[TestFailure]:
         task_name = str(task.get("task_name") or task.get("name") or "")
         for tr in task.get("test_results") or []:
             if tr.get("passed") is False:
-                failures.append(
-                    TestFailure(task=task_name, test_name=str(tr.get("name") or ""))
-                )
+                failures.append(TestFailure(task=task_name, test_name=str(tr.get("name") or "")))
     return failures
 
 

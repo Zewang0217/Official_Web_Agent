@@ -55,13 +55,7 @@ async def run_suite(
         expect = bool(case.get("expect_detect", False))
         hit, matched = scan_injection(text)
         passed = hit == expect
-        detail = (
-            f"命中 {matched!r}"
-            if hit
-            else "未命中(期望)"
-            if expect
-            else "未命中(符合预期)"
-        )
+        detail = f"命中 {matched!r}" if hit else "未命中(期望)" if expect else "未命中(符合预期)"
         results.append(CaseResult(id=cid, passed=passed, detail=detail))
 
     failures = [c for c in results if not c.passed and not c.skipped]

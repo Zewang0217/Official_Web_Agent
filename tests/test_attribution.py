@@ -32,9 +32,7 @@ def _json(payload) -> Response:
 
 @respx.mock
 async def test_trusted_own_when_owner_equals_login() -> None:
-    result = await attribute(
-        "me", "my-project", login="me", source="url", client=_client()
-    )
+    result = await attribute("me", "my-project", login="me", source="url", client=_client())
     assert result.level == "trusted-own"
     assert result.deep_dive_allowed
 
@@ -44,9 +42,7 @@ async def test_trusted_contribution_via_commits() -> None:
     respx.get(f"{base}/repos/org/other/commits").mock(
         _json([{"sha": "a1", "commit": {"message": "x"}, "author": {"login": "me"}}])
     )
-    result = await attribute(
-        "org", "other", login="me", source="search", client=_client()
-    )
+    result = await attribute("org", "other", login="me", source="search", client=_client())
     assert result.level == "trusted-contribution"
     assert "commits author=me" in result.evidence
 
@@ -57,17 +53,13 @@ async def test_trusted_contribution_via_pr_when_no_commits() -> None:
     respx.get(f"{base}/search/issues").mock(
         _json({"items": [{"number": 7, "title": "feat", "pull_request": {"url": "u"}}]})
     )
-    result = await attribute(
-        "org", "other", login="me", source="search", client=_client()
-    )
+    result = await attribute("org", "other", login="me", source="search", client=_client())
     assert result.level == "trusted-contribution"
     assert "PR author=me" in result.evidence
 
 
 async def test_claimed_url_without_login() -> None:
-    result = await attribute(
-        "someone", "repo", login="", source="url", client=_client()
-    )
+    result = await attribute("someone", "repo", login="", source="url", client=_client())
     assert result.level == "claimed"
     assert result.deep_dive_allowed  # claimed 深挖,信封标注
 
@@ -77,9 +69,7 @@ async def test_unverified_search_hit_without_evidence() -> None:
     # 绑定了登录名但 commits/PR 都查无 → 搜索来源归 unverified
     respx.get(f"{base}/repos/org/popular/commits").mock(_json([]))
     respx.get(f"{base}/search/issues").mock(_json({"items": []}))
-    result = await attribute(
-        "org", "popular", login="me", source="search", client=_client()
-    )
+    result = await attribute("org", "popular", login="me", source="search", client=_client())
     assert result.level == "unverified"
     assert result.deep_dive_allowed is False  # 不深挖,仅 guided
 
@@ -94,9 +84,7 @@ async def test_fork_under_other_owner_with_authored_commits() -> None:
     respx.get(f"{base}/repos/upstream/proj/commits").mock(
         _json([{"sha": "f1", "commit": {"message": "fix"}, "author": {"login": "me"}}])
     )
-    result = await attribute(
-        "upstream", "proj", login="me", source="url", client=_client()
-    )
+    result = await attribute("upstream", "proj", login="me", source="url", client=_client())
     assert result.level == "trusted-contribution"
 
 
@@ -196,9 +184,7 @@ async def test_contribution_claim_unbound_is_claimed_not_deep() -> None:
 async def test_contribution_claim_bound_without_evidence_is_claimed() -> None:
     respx.get(f"{base}/repos/org/x/commits").mock(_json([]))
     respx.get(f"{base}/search/issues").mock(_json({"items": []}))
-    result = await attribute(
-        "org", "x", login="me", source="contribution", client=_client()
-    )
+    result = await attribute("org", "x", login="me", source="contribution", client=_client())
     assert result.level == "claimed"
     assert "未查到" in result.evidence
 

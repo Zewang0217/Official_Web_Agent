@@ -32,9 +32,7 @@ def test_save_scorecard_version_increments(monkeypatch) -> None:
     sqls = [c.args[0] for c in conn.execute.call_args_list]
     assert any("COALESCE(MAX(card_version), 0)" in s for s in sqls)
     insert = next(
-        c
-        for c in conn.execute.call_args_list
-        if "INSERT INTO evaluation_scorecard" in c.args[0]
+        c for c in conn.execute.call_args_list if "INSERT INTO evaluation_scorecard" in c.args[0]
     )
     params = insert.args[1]
     assert params[0] == 9 and params[1] == 2026 and params[2] == 3

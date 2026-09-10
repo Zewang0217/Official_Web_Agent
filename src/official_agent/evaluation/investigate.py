@@ -26,6 +26,7 @@ _MIN_SUBSTANTIVE = 24
 # 值得度信号
 _SIGNAL_DIRS = ("src/", "app/", "tests/", "test/", "docs/", "server/", "client/")
 
+
 def _strip_repo(owner: str, repo: str) -> tuple[str, str] | None:
     """清洗单个 owner/repo:剥 .git 与尾随标点;空段返回 None。"""
     if repo.lower().endswith(".git"):

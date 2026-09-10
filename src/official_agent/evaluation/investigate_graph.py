@@ -75,11 +75,7 @@ async def route_node(state: InvestigationState) -> dict:
     login = state.get("candidate_login", "")
     pinned_owner = state.get("repo_owner")
     pinned_name = state.get("repo_name")
-    repo = (
-        (pinned_owner, pinned_name)
-        if pinned_owner and pinned_name
-        else extract_repo(text)
-    )
+    repo = (pinned_owner, pinned_name) if pinned_owner and pinned_name else extract_repo(text)
     if repo is None and not login and detect_contribution_target(text) is None:
         # 无仓位置且无登录名/贡献声明:不建 client(零 GitHub 调用,skip 断言依赖此)
         return {"route": route_project(text, None)}
@@ -94,9 +90,7 @@ async def route_node(state: InvestigationState) -> dict:
         # → claimed,不深挖只出过程题
         target = detect_contribution_target(text)
         if target:
-            found = await attribute(
-                *target, login=login, source="contribution", client=client
-            )
+            found = await attribute(*target, login=login, source="contribution", client=client)
             if found.deep_dive_allowed:
                 repo = target
             else:
@@ -142,9 +136,7 @@ async def route_node(state: InvestigationState) -> dict:
         return degraded
     if found is None:
         # 钉住/URL 直配的仓:简历自述来源 → source=url(归属内部自查 commits/PR)
-        found = await attribute(
-            repo[0], repo[1], login=login, source="url", client=client
-        )
+        found = await attribute(repo[0], repo[1], login=login, source="url", client=client)
     readable = True
     route = route_project(text, readable)
     if not found.deep_dive_allowed:
@@ -326,9 +318,7 @@ async def generate_node(state: InvestigationState) -> dict:
 _ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
 
 
-def _validate_group_v2(
-    payload: dict[str, Any], dossier_text: str, paths: list[str]
-) -> None:
+def _validate_group_v2(payload: dict[str, Any], dossier_text: str, paths: list[str]) -> None:
     """v2 后置校验(#152):对抗前提黑名单/路径白名单/链源真实性。
 
     局限(诚实边界):链源真实性只对拉丁词元可判定,纯中文 theme 跳过
@@ -412,9 +402,7 @@ def _attribution_level(level: Any) -> Any:
 
 async def skip_node(state: InvestigationState) -> dict:
     """skip:此维不出题(空集合法,#130);信封 v2 形状。"""
-    envelope = QbankV2(
-        mode="skipped", group=QuestionGroupV2(), prompt_version=_prompt_version()
-    )
+    envelope = QbankV2(mode="skipped", group=QuestionGroupV2(), prompt_version=_prompt_version())
     return {"question_set": envelope.model_dump(), "error": None}
 
 
@@ -437,11 +425,15 @@ def build_investigation_subgraph() -> Any:
     g.add_node("skip", skip_node)
     g.add_node("finalize", finalize)
     g.set_entry_point("route")
-    g.add_conditional_edges("route", route_after_route, {
-        "deep_dive": "explore",
-        "guided": "generate",
-        "skip": "skip",
-    })
+    g.add_conditional_edges(
+        "route",
+        route_after_route,
+        {
+            "deep_dive": "explore",
+            "guided": "generate",
+            "skip": "skip",
+        },
+    )
     g.add_edge("explore", "generate")
     g.add_edge("generate", "finalize")
     g.add_edge("skip", "finalize")

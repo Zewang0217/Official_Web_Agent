@@ -186,17 +186,14 @@ async def explore_repo(
                 )
             )
             remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
-            response = await asyncio.wait_for(
-                model.ainvoke(messages), timeout=max(remaining, 1.0)
-            )
+            response = await asyncio.wait_for(model.ainvoke(messages), timeout=max(remaining, 1.0))
             messages.append(response)
             # D9/#154:extract_usage 统一解析。raw token_usage 优先——
             # DeepSeek prompt_cache_hit/miss 只在原始 usage,langchain 转换
             # 会丢(#113 先例,评审 P0 实测 usage_metadata 恒真值短路兜底)
             response_metadata = getattr(response, "response_metadata", None) or {}
             usage = extract_usage(
-                response_metadata.get("token_usage")
-                or getattr(response, "usage_metadata", None)
+                response_metadata.get("token_usage") or getattr(response, "usage_metadata", None)
             )
             input_tokens += usage.get("input_tokens") or 0
             output_tokens += usage.get("output_tokens") or 0
@@ -243,11 +240,7 @@ async def explore_repo(
                     dossier.paths, dossier.paths_truncated = payload
                 slots = _SLOT_BY_TOOL.get(tool_name, ())
                 # 逐槽写入(any 会短路,多槽元组实际只进首槽——评审 P1)
-                written = (
-                    [dossier.add(slot, observation) for slot in slots]
-                    if observation
-                    else []
-                )
+                written = [dossier.add(slot, observation) for slot in slots] if observation else []
                 if written:
                     hit = [
                         slot

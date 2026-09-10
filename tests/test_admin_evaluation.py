@@ -52,9 +52,7 @@ _AUTH = {"Authorization": "Bearer tok"}
 
 
 def test_evaluation_requires_auth(client: TestClient) -> None:
-    resp = client.post(
-        "/api/agent/admin/evaluation/run", json={"cycle_id": 2026, "items": []}
-    )
+    resp = client.post("/api/agent/admin/evaluation/run", json={"cycle_id": 2026, "items": []})
     assert resp.status_code == 401
 
 
@@ -72,9 +70,7 @@ def test_evaluation_rejects_without_resume_audit(
     assert "resume:audit" in resp.json()["detail"]
 
 
-def test_evaluation_run_submits_jobs(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_evaluation_run_submits_jobs(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from official_agent.web import evaluation_admin as ea
 
     _install_resolve(monkeypatch, _identity(["resume:audit"]))

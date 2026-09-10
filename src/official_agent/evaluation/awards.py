@@ -40,9 +40,7 @@ def extract_awards(fields: list[FieldText]) -> list[str]:
     return awards
 
 
-async def build_award_brief(
-    provider: SearchProvider, award_title: str
-) -> dict[str, Any]:
+async def build_award_brief(provider: SearchProvider, award_title: str) -> dict[str, Any]:
     """奖项背景卡(#131):查得到给背景摘要,查不到标「不可考」。
 
     两条纪律:#131 明文——查不到绝不编含金量;追问永远收窄到候选人

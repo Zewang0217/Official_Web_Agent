@@ -91,11 +91,7 @@ def _install_fakes(
 
 def _sse_events(resp) -> list[dict]:
     body = "".join(resp.iter_text())
-    return [
-        json.loads(line[5:]) for line in body.splitlines() if line.startswith("data: ")
-    ]
-
-
+    return [json.loads(line[5:]) for line in body.splitlines() if line.startswith("data: ")]
 
 
 def test_error_code_classification() -> None:
@@ -105,10 +101,7 @@ def test_error_code_classification() -> None:
     from official_agent.tools.client import BackendError
     from official_agent.web.routes import _error_code
 
-    assert (
-        _error_code(BackendError("用户令牌无效或已过期,需用户重新登录后重试"))
-        == "auth_expired"
-    )
+    assert _error_code(BackendError("用户令牌无效或已过期,需用户重新登录后重试")) == "auth_expired"
     assert _error_code(BackendError("token 无效")) == "auth_expired"
     assert _error_code(httpx.ConnectError("refused")) == "backend_unavailable"
     assert _error_code(httpx.TimeoutException("slow")) == "backend_unavailable"
@@ -132,9 +125,7 @@ def test_chat_empty_message_returns_400(
     assert resp.status_code == 400
 
 
-def test_chat_bad_token_returns_401(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_chat_bad_token_returns_401(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """身份解析失败(后端 /auth/me 拒/不可达)→ 401,不透出异常细节。"""
 
     async def _fail(*_a: object, **_k: object):
@@ -152,8 +143,6 @@ def test_chat_bad_token_returns_401(
     # review:不透出内网/异常细节,只回通用文案
     assert "身份解析失败" in resp.text
     assert "backend" not in resp.text.lower()
-
-
 
 
 def test_chat_valid_token_streams_session_and_done(
@@ -278,17 +267,20 @@ def test_chat_usage_from_usage_metadata_only(
 
     class _UsageAgent:
         async def astream(self, inp, config=None, **kwargs):
-            yield "messages", (
-                AIMessageChunk(
-                    content="你好",
-                    usage_metadata={
-                        "input_tokens": 87,
-                        "output_tokens": 22,
-                        "total_tokens": 109,
-                        "input_token_details": {"cache_read": 12, "cache_creation": 75},
-                    },
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="你好",
+                        usage_metadata={
+                            "input_tokens": 87,
+                            "output_tokens": 22,
+                            "total_tokens": 109,
+                            "input_token_details": {"cache_read": 12, "cache_creation": 75},
+                        },
+                    ),
+                    {},
                 ),
-                {},
             )
             yield "updates", {"agent": {"messages": []}}
 
@@ -301,9 +293,7 @@ def test_chat_usage_from_usage_metadata_only(
     logged: list[dict] = []
     monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
     _install_fakes(monkeypatch)
-    monkeypatch.setattr(
-        routes, "build_assistant_agent", lambda *a, **k: _UsageAgent()
-    )
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _UsageAgent())
 
     with client.stream(
         "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
@@ -488,8 +478,6 @@ def test_chat_writes_conversation_log_row(
     assert row["error_code"] is None  # 正常轮无错误码
 
 
-
-
 def test_chat_error_path_logs_error_row(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -589,7 +577,8 @@ def test_chat_message_too_long_returns_400(
     _install_fakes(monkeypatch)
     long_msg = "长" * (routes._MAX_MESSAGE_CHARS + 1)
     resp = client.post(
-        "/api/agent/chat", json={"message": long_msg},
+        "/api/agent/chat",
+        json={"message": long_msg},
         headers={"Authorization": "Bearer tok"},
     )
     assert resp.status_code == 400
@@ -622,7 +611,7 @@ def test_stream_turn_busy_when_lock_held(client: TestClient) -> None:
         async with session.turn_lock:  # 模拟另一轮正在执行
             gen = routes._stream_turn(session, "hi", False)
             first = await gen.__anext__()
-            event = jsonlib.loads(first[len("data: "):])
+            event = jsonlib.loads(first[len("data: ") :])
             assert event["type"] == "error" and event["code"] == "busy"
             await gen.aclose()
 
@@ -693,9 +682,7 @@ def test_chat_toolless_reply_buffered_and_guarded(
     _install_fake_agent(monkeypatch, "查询结果:您有 3 份简历待筛选。")
     ident = auth_ok_data(role="unknown", role_names=["访客"])
     ident["permission_codes"] = []
-    monkeypatch.setattr(
-        "official_agent.web.routes.resolve", fake_resolve(ident)
-    )
+    monkeypatch.setattr("official_agent.web.routes.resolve", fake_resolve(ident))
     resp = client.post(
         "/api/agent/chat", json={"message": "有几份简历?"}, headers={"Authorization": "Bearer tok"}
     )

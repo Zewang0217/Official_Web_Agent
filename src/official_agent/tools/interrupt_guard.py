@@ -9,6 +9,7 @@
 
 写路径 fail-closed(ADR-0005):无法挂起确认 = 拒绝写操作,绝不静默放行。
 """
+
 from langgraph.types import interrupt
 
 
@@ -39,4 +40,3 @@ def require_confirmation(summary: str) -> str:
     if decision not in (APPROVE, REJECT):
         raise ConfirmationRequired(f"非法确认决策:{decision!r}(仅接受 approve/reject)")
     return decision
-

@@ -188,8 +188,7 @@ async def run_bundle(
             "",
         )
         skill_qs = await _b4_questions(
-            f"候选部门:{department or '未填'}。候选人材料:\n"
-            + "\n".join(f.value for f in fields),
+            f"候选部门:{department or '未填'}。候选人材料:\n" + "\n".join(f.value for f in fields),
             count_min=2,
             count_max=4,
         )
@@ -219,9 +218,7 @@ async def run_bundle(
                 )
             for chain in inner.get("chains", []):
                 for layer in chain.get("layers", []):
-                    all_questions.append(
-                        {"question": layer.get("question", ""), "time_minutes": 3}
-                    )
+                    all_questions.append({"question": layer.get("question", ""), "time_minutes": 3})
             for reserve in inner.get("reserves", []):
                 all_questions.append(
                     {

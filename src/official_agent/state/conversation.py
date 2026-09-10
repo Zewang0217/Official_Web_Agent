@@ -83,12 +83,11 @@ def ensure_conversation_table() -> None:
         # M6 #113/#114:prefix_hash、compress_event 为增量加列,老库幂等补齐
         # (#110/#113 建的存量表缺 compress_event → INSERT 全失败且被
         # fail-open 吞掉 = 整表静默停写,必须随建表一起补)
-        conn.execute(
-            "ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS prefix_hash text"
-        )
+        conn.execute("ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS prefix_hash text")
         conn.execute(
             "ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS compress_event text"
         )
+
 
 def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
     """prefix 稳定性 hash(#113 命中证据):system prompt + 工具名的确定性指纹。

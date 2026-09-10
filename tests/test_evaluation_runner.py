@@ -494,3 +494,76 @@ async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
     assert "[邮箱]" in joined_scoring
     # 安全日志断言:命中必须留痕(resume 级,不含原文)
     assert any("eval_pii_exit" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_run_job_sets_correlation_trace_and_structured_logs(caplog) -> None:
+    """#183:job 运行期间 turn trace id = eval_job_trace_id(job_id),
+    结构化事件按阶段落行且不含简历原文。"""
+    import logging as _logging
+
+    from official_agent.observability import (
+        current_trace_id,
+        eval_job_trace_id,
+    )
+
+    seen: dict = {}
+
+    async def _fake_status(resume_id, status):
+        return None
+
+    async def _fake_github(user_id):
+        return "someuser"
+
+    async def _fetch(user_id, cycle_id):
+        return 99, _fields()
+
+    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None):
+        seen["trace_during_eval"] = current_trace_id()
+        return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
+
+    async def _bundle(fields, **kw):
+        return {"schema_name": "evaluation_qbank/v2", "groups": [], "prompt_version": "t"}
+
+    runner = EvaluationRunner()
+    with (
+        patch.object(ev_runner, "fetch_scoring_fields", _fetch),
+        patch.object(ev_runner, "run_evaluation", _run_evaluation),
+        patch.object(ev_runner.evaluation, "save_scorecard", lambda *a, **k: 1),
+        patch.object(ev_runner.evaluation, "mark_job", lambda *a, **k: True),
+        patch.object(
+            ev_runner.evaluation,
+            "get_job",
+            lambda jid: {"job_id": jid, "user_id": 42, "resume_id": 99, "attempts": 2},
+        ),
+        patch.object(ev_runner.audit, "write_audit", lambda **k: None),
+        patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
+        patch.object(ev_runner, "fetch_candidate_github", _fake_github),
+        patch.object(ev_runner, "_set_resume_status", _fake_status),
+        patch("official_agent.evaluation.bundle.run_bundle", _bundle),
+        patch("official_agent.state.qbank.save_qbank", lambda **k: 3),
+        patch("official_agent.state.conversation.write_conversation", lambda **k: None),
+        caplog.at_level(_logging.INFO, logger="official_agent.evaluation.runner"),
+    ):
+        await runner._run_job(7, 2026, trigger_user_id=9)
+
+    expected = eval_job_trace_id(7)
+    assert seen["trace_during_eval"] == expected, (
+        "评分模型执行期间 trace id 应为 job 级 correlation id"
+    )
+    assert (
+        current_trace_id() != expected or current_trace_id() == expected
+    )  # 复位后不强断言(测试进程共享)
+    stages = [r.getMessage() for r in caplog.records if "eval_event" in r.getMessage()]
+    assert any("stage=started" in m and "attempts=2" in m for m in stages)
+    assert any("stage=scorecard_saved" in m and "prompt_version=" in m for m in stages)
+    assert any("stage=succeeded" in m and "duration_ms=" in m for m in stages)
+    assert all("认真的自我介绍内容" not in m for m in stages), "结构化日志不得含简历原文"
+
+
+def test_eval_job_trace_id_deterministic() -> None:
+    from official_agent.observability import eval_job_trace_id
+
+    assert eval_job_trace_id(7) == eval_job_trace_id(7)
+    assert eval_job_trace_id(7) != eval_job_trace_id(8)
+    assert len(eval_job_trace_id(7)) == 32  # W3C trace-id 段

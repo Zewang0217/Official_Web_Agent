@@ -89,9 +89,7 @@ def keyword_candidates(text: str) -> list[str]:
     return kws
 
 
-_STOPWORDS = frozenset(
-    {"github", "http", "https", "com", "www", "git", "org", "io", "net", "cn"}
-)
+_STOPWORDS = frozenset({"github", "http", "https", "com", "www", "git", "org", "io", "net", "cn"})
 
 
 def _norm(name: str) -> str:
@@ -113,9 +111,7 @@ def _repo_matches(row: dict, keywords: list[str]) -> bool:
     return False
 
 
-async def _contribution_evidence(
-    client: GitHubClient, owner: str, name: str, login: str
-) -> str:
+async def _contribution_evidence(client: GitHubClient, owner: str, name: str, login: str) -> str:
     """author=login 的 commits/PR 证据;查到返回描述串,没查到/不可读返回空。
 
     commits 与 PR 任一命中即算(D4/ADR-0008);查询失败按无证据处理——
@@ -145,9 +141,7 @@ async def attribute(
 ) -> RepoAttribution:
     """对已定位的仓做四级归属判定(ADR-0008)。"""
     if login and owner.lower() == login.lower():
-        return RepoAttribution(
-            owner, name, "trusted-own", f"owner==绑定登录名 {login}", source
-        )
+        return RepoAttribution(owner, name, "trusted-own", f"owner==绑定登录名 {login}", source)
     if login:
         evidence = await _contribution_evidence(client, owner, name, login)
         if evidence:
@@ -156,9 +150,7 @@ async def attribute(
         return RepoAttribution(owner, name, "claimed", "简历 URL 自述,未核对", source)
     if source == "contribution":
         reason = (
-            "贡献声明,未绑定无法核对,仅过程题"
-            if not login
-            else "贡献声明,绑定但未查到 commits/PR"
+            "贡献声明,未绑定无法核对,仅过程题" if not login else "贡献声明,绑定但未查到 commits/PR"
         )
         return RepoAttribution(owner, name, "claimed", reason, source)
     return RepoAttribution(owner, name, "unverified", "搜索命中,无归属证据", source)

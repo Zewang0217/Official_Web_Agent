@@ -82,9 +82,7 @@ async def test_normal_path_scores_and_weights_total() -> None:
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(_GOOD_JSON)),
         patch.object(ev, "get_effective_settings", _settings),
     ):
-        card = await ev.run_evaluation(
-            _FIELDS, resume_id=2, cycle_id=2026, weights=_WEIGHTS
-        )
+        card = await ev.run_evaluation(_FIELDS, resume_id=2, cycle_id=2026, weights=_WEIGHTS)
     assert card["hard_zero"] is False
     assert card["total"] == 70.0  # (80×3 + 40×1) / 4
     assert card["attitude"]["verdict"] == "sincere"

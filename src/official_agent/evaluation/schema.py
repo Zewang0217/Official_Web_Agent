@@ -25,9 +25,7 @@ class DimensionScore(BaseModel):
     field_key: str = Field(min_length=1, description="简历字段键(周期配置驱动)")
     score: int = Field(ge=0, le=100)
     rationale: str = Field(min_length=1, description="为什么给这个分")
-    evidence: str = Field(
-        min_length=1, max_length=120, description="该维原文句,逐字引用"
-    )
+    evidence: str = Field(min_length=1, max_length=120, description="该维原文句,逐字引用")
 
 
 class AttitudeVerdict(BaseModel):
@@ -72,9 +70,7 @@ class InterviewQuestion(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    anchor: Literal[
-        "architecture", "claims_vs_reality", "edge_case", "tradeoff", "guided"
-    ]
+    anchor: Literal["architecture", "claims_vs_reality", "edge_case", "tradeoff", "guided"]
     question: str = Field(min_length=1)
     sub_prompts: list[str] = Field(default_factory=list, max_length=5)
     answer_reference: AnswerReference
@@ -112,9 +108,7 @@ CATEGORY = Literal[
     "C10_复盘与改进",
 ]
 
-ATTRIBUTION_LEVEL = Literal[
-    "trusted-own", "trusted-contribution", "claimed", "unverified", "none"
-]
+ATTRIBUTION_LEVEL = Literal["trusted-own", "trusted-contribution", "claimed", "unverified", "none"]
 
 
 class ChainLayer(BaseModel):
@@ -171,8 +165,8 @@ class QuestionGroupV2(BaseModel):
 
     @property
     def total_questions(self) -> int:
-        return (1 if self.entry else 0) + sum(len(c.layers) for c in self.chains) + len(
-            self.reserves
+        return (
+            (1 if self.entry else 0) + sum(len(c.layers) for c in self.chains) + len(self.reserves)
         )
 
 
@@ -226,9 +220,7 @@ class QbankV2(BaseModel):
 
 # ── LLM-as-judge 出题质量报告(#155/#62;首版只报告不阻塞) ──
 
-JUDGE_DIMENSION = Literal[
-    "relevance", "specificity", "fairness", "differentiation"
-]
+JUDGE_DIMENSION = Literal["relevance", "specificity", "fairness", "differentiation"]
 
 
 class JudgeDimensionScore(BaseModel):

@@ -113,9 +113,7 @@ async def run_suite(
 
     notes = []
     if golden_scores:
-        notes.append(
-            f"golden top1 分布: min={min(golden_scores):.3f} max={max(golden_scores):.3f}"
-        )
+        notes.append(f"golden top1 分布: min={min(golden_scores):.3f} max={max(golden_scores):.3f}")
     if neg_scores:
         notes.append(
             f"negative top1 分布: min={min(neg_scores):.3f} max={max(neg_scores):.3f}"

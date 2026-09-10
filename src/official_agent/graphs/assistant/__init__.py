@@ -109,11 +109,7 @@ def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
     names = _ROLE_TOOL_NAMES.get(identity.get("role", "unknown"), ())
     tools = []
     for name in names:
-        raw = (
-            _bind_my_interview(user_token)
-            if name == "get_my_interview"
-            else _ALL_TOOLS[name]
-        )
+        raw = _bind_my_interview(user_token) if name == "get_my_interview" else _ALL_TOOLS[name]
         # GRA-04/#163:工具返回出口统一过注入守卫(数据区标签+确定性扫描)
         tools.append(mount_input_guard(raw))
     return tools
@@ -136,8 +132,8 @@ def identity_message(identity: ResolvedIdentity) -> str:
         "unknown": "用户",
     }.get(identity.get("role", "unknown"), "用户")
     name = identity.get("name")
-    greeting = f"{name}同学" if name and identity.get("role") == "candidate" else (
-        name or role_label
+    greeting = (
+        f"{name}同学" if name and identity.get("role") == "candidate" else (name or role_label)
     )
     perms = identity.get("permission_codes") or []
     perm_note = (
@@ -146,9 +142,7 @@ def identity_message(identity: ResolvedIdentity) -> str:
         else ",当前无额外数据访问权限"
     )
     return (
-        f"当前对话用户是{greeting}({role_label})。"
-        f"{perm_note}。"
-        "回答时用自然称呼,不要提及内部字段。"
+        f"当前对话用户是{greeting}({role_label})。{perm_note}。回答时用自然称呼,不要提及内部字段。"
     )
 
 
@@ -189,9 +183,7 @@ def build_system_prompt(identity: ResolvedIdentity) -> str:
     按角色分档命中(同角色会话内仍稳定)。这是 #166 的取舍:内部上下文
     绝不进对话消息面,代价是缓存粒度从「全局」降为「按角色」。
     """
-    return (
-        f"{load_system_prompt()}\n\n{identity_message(identity)}\n\n{tool_contract(identity)}"
-    )
+    return f"{load_system_prompt()}\n\n{identity_message(identity)}\n\n{tool_contract(identity)}"
 
 
 def compose_first_message(user_token: str = "") -> str:
@@ -206,7 +198,9 @@ def compose_first_message(user_token: str = "") -> str:
 
 
 def build_model(
-    settings: Any, model: str | None = None, stream_usage: bool = False,
+    settings: Any,
+    model: str | None = None,
+    stream_usage: bool = False,
     temperature: float | None = None,
 ) -> Any:
     """按配置构造对话模型(GRA-08 路由的接入点)。
@@ -226,16 +220,12 @@ def build_model(
         from langchain_openai import ChatOpenAI
 
         if not settings.llm_base_url or not settings.llm_api_key:
-            raise ValueError(
-                "openai-compatible 模式需要在 .env 配置 LLM_BASE_URL 与 LLM_API_KEY"
-            )
+            raise ValueError("openai-compatible 模式需要在 .env 配置 LLM_BASE_URL 与 LLM_API_KEY")
         return ChatOpenAI(
             model=model,
             api_key=SecretStr(settings.llm_api_key),
             base_url=settings.llm_base_url,
-            model_kwargs=(
-                {"stream_options": {"include_usage": True}} if stream_usage else {}
-            ),
+            model_kwargs=({"stream_options": {"include_usage": True}} if stream_usage else {}),
             **({"temperature": temperature} if temperature is not None else {}),
         )
     # ChatAnthropic 为 pydantic **kwargs 构造器,mypy 无法静态解析字段

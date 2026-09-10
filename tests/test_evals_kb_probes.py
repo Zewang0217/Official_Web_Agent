@@ -85,6 +85,7 @@ async def test_miss_and_false_hit_fail_with_details(tmp_path: Path) -> None:
 
 async def test_threshold_breach_fails_even_if_all_probes_pass(tmp_path: Path) -> None:
     """全部命中但都排 rank2 → recall 达标、MRR 低于基线,门禁仍 FAIL(OBS-07)。"""
+
     async def search(query: str, top_k: int) -> list[_Hit]:
         if query == "天气?":
             return [_Hit("社团介绍", 0.21)]

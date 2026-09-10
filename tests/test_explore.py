@@ -86,9 +86,7 @@ class _FakeClient:
 def _ai_with_tools(calls: list[tuple[str, dict]]):
     return AIMessage(
         "",
-        tool_calls=[
-            {"name": n, "args": a, "id": f"c{i}"} for i, (n, a) in enumerate(calls)
-        ],
+        tool_calls=[{"name": n, "args": a, "id": f"c{i}"} for i, (n, a) in enumerate(calls)],
     )
 
 
@@ -129,8 +127,13 @@ async def test_turn_budget_gate_marks_degraded(monkeypatch: pytest.MonkeyPatch) 
     always_tools = [_ai_with_tools([("repo_meta", {})])] * 10
     model = _FakeModel(always_tools)
     dossier = await explore_repo(
-        project_text="t", owner="o", name="r", attribution="", login="",
-        client=_FakeClient(), model=model,  # type: ignore[arg-type]
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),
+        model=model,  # type: ignore[arg-type]
     )
     assert dossier.degraded
     assert "轮数 2 触顶" in dossier.degrade_reason
@@ -142,8 +145,13 @@ async def test_wall_clock_gate_marks_degraded(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(explore_mod, "MAX_WALL_SECONDS", 0)
     model = _FakeModel([_ai_with_tools([("repo_meta", {})])])
     dossier = await explore_repo(
-        project_text="t", owner="o", name="r", attribution="", login="",
-        client=_FakeClient(), model=model,  # type: ignore[arg-type]
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),
+        model=model,  # type: ignore[arg-type]
     )
     assert dossier.degraded
     assert "墙钟" in dossier.degrade_reason
@@ -162,10 +170,12 @@ async def test_dossier_cap_gate_discards_and_degrades(
         ]
     )
     dossier = await explore_repo(
-        project_text="t", owner="o", name="r", attribution="", login="",
-        client=_FakeClient(
-            {"read_file": {"type": "file", "content": "y" * 120}}
-        ),  # type: ignore[arg-type]
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient({"read_file": {"type": "file", "content": "y" * 120}}),  # type: ignore[arg-type]
         model=model,  # type: ignore[arg-type]
     )
     assert dossier.degraded
@@ -179,12 +189,15 @@ async def test_github_unavailable_becomes_observation_not_crash() -> None:
         async def repo_meta(self, owner, repo):
             raise GitHubUnavailable("GitHub 403")
 
-    model = _FakeModel(
-        [_ai_with_tools([("repo_meta", {})]), _text_ai("查不了")]
-    )
+    model = _FakeModel([_ai_with_tools([("repo_meta", {})]), _text_ai("查不了")])
     dossier = await explore_repo(
-        project_text="t", owner="o", name="r", attribution="", login="",
-        client=_DeadClient(), model=model,  # type: ignore[arg-type]
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_DeadClient(),
+        model=model,  # type: ignore[arg-type]
     )
     assert not dossier.degraded  # 单工具失败是观察,不是任务失败
     assert "工具不可用" in dossier.slots["C1_背景与动机"] or dossier.slots["C1_背景与动机"] == ""
@@ -200,8 +213,13 @@ async def test_model_exception_degrades_without_raise() -> None:
             raise RuntimeError("LLM exploded")
 
     dossier = await explore_repo(
-        project_text="t", owner="o", name="r", attribution="", login="",
-        client=_FakeClient(), model=_BoomModel(),  # type: ignore[arg-type]
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),
+        model=_BoomModel(),  # type: ignore[arg-type]
     )
     assert dossier.degraded
     assert "探索异常" in dossier.degrade_reason
@@ -212,8 +230,13 @@ async def test_bind_failure_degrades() -> None:
     model = _FakeModel([])
     model.bind_failed = True
     dossier = await explore_repo(
-        project_text="t", owner="o", name="r", attribution="", login="",
-        client=_FakeClient(), model=model,  # type: ignore[arg-type]
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),
+        model=model,  # type: ignore[arg-type]
     )
     assert dossier.degraded and "绑定失败" in dossier.degrade_reason
 
@@ -228,8 +251,13 @@ async def test_cache_discipline_append_only_and_static_system() -> None:
         ]
     )
     await explore_repo(
-        project_text="自述甲", owner="o", name="r", attribution="", login="登录名甲",
-        client=_FakeClient(), model=model,  # type: ignore[arg-type]
+        project_text="自述甲",
+        owner="o",
+        name="r",
+        attribution="",
+        login="登录名甲",
+        client=_FakeClient(),
+        model=model,  # type: ignore[arg-type]
     )
     assert model.system_texts, "system 只发一次"
     assert all(t == model.system_texts[0] for t in model.system_texts)
@@ -248,12 +276,15 @@ async def test_cache_discipline_append_only_and_static_system() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_tool_reports_observation() -> None:
-    model = _FakeModel(
-        [_ai_with_tools([("delete_repo", {})]), _text_ai("done")]
-    )
+    model = _FakeModel([_ai_with_tools([("delete_repo", {})]), _text_ai("done")])
     dossier = await explore_repo(
-        project_text="t", owner="o", name="r", attribution="", login="",
-        client=_FakeClient(), model=model,  # type: ignore[arg-type]
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),
+        model=model,  # type: ignore[arg-type]
     )
     assert not dossier.degraded  # 幻觉工具名不炸循环
 

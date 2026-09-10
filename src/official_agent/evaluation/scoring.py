@@ -35,9 +35,7 @@ class FieldText:
     placeholder: str = ""
 
 
-def is_hard_zero_value(
-    value: str, *, title: str = "", placeholder: str = ""
-) -> bool:
+def is_hard_zero_value(value: str, *, title: str = "", placeholder: str = "") -> bool:
     """单值绝对卡判定。规则序:空 → 单字 → 单字符重复 → 纯数字 → placeholder。"""
     v = (value or "").strip()
     ph = (placeholder or "").strip()

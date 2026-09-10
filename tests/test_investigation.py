@@ -1,6 +1,5 @@
 """B3 调查子图·仓深挖测试:路由/值得度/GitHub 客户端(respx)/子图三路径。"""
 
-
 import json
 from typing import Any
 
@@ -25,8 +24,7 @@ def test_extract_repo_tolerates_git_suffix_and_noise() -> None:
 def test_extract_repos_returns_all_and_dedupes() -> None:
     """M-1:多仓候选不再只取第一个;保序+去重;.git/尾随标点清洗。"""
     text = (
-        "前端 https://github.com/me/web.git 后端 "
-        "github.com/me/api, 重复 https://github.com/me/web"
+        "前端 https://github.com/me/web.git 后端 github.com/me/api, 重复 https://github.com/me/web"
     )
     assert inv.extract_repos(text) == [("me", "web"), ("me", "api")]
     assert inv.extract_repos("没有链接") == []
@@ -41,18 +39,16 @@ def test_route_three_ways() -> None:
     assert inv.route_project(long_text, None) == "guided"  # 无仓有实质
     assert inv.route_project("太短", None) == "skip"  # 无仓无实质
     assert inv.route_project("太短", False) == "guided"  # 有仓但不可读→引导
+
+
 # ── GitHub 客户端(respx) ────────────────────────────────
 
 
 @respx.mock
 async def test_client_happy_paths() -> None:
     base = "https://api.github.test"
-    respx.get(f"{base}/repos/o/r").mock(
-        return_value=Response(200, json={"default_branch": "main"})
-    )
-    respx.get(f"{base}/repos/o/r/readme").mock(
-        return_value=Response(200, text="# Demo\n内容")
-    )
+    respx.get(f"{base}/repos/o/r").mock(return_value=Response(200, json={"default_branch": "main"}))
+    respx.get(f"{base}/repos/o/r/readme").mock(return_value=Response(200, text="# Demo\n内容"))
     respx.get(f"{base}/repos/o/r/commits").mock(
         return_value=Response(
             200, json=[{"commit": {"message": "feat: x", "author": {"date": "2026-01-01"}}}]
@@ -156,8 +152,10 @@ def _chain(category: str, theme: str, n_layers: int = 3) -> dict:
         "category": category,
         "theme": theme,
         "layers": [
-            {"question": f"L{i+1}: {theme} 的第{i+1}层怎么落地?",
-             "expected_signal": "能讲清设计取舍"}
+            {
+                "question": f"L{i + 1}: {theme} 的第{i + 1}层怎么落地?",
+                "expected_signal": "能讲清设计取舍",
+            }
             for i in range(n_layers)
         ],
     }
@@ -299,6 +297,8 @@ def test_repo_regex_boundaries() -> None:
     assert inv.extract_repo("项目是 github.com/owner/repo.") == ("owner", "repo")
     assert inv.extract_repo("看 mygithub.com/owner/repo 这个") is None
     assert inv.extract_repo("github.com/owner/repo.git 已归档") == ("owner", "repo")
+
+
 @pytest.mark.asyncio
 async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
     """探索零材料 → guided 降级(§3.4:GitHub 不可达/探索全败,替代旧 worthiness=none)。"""
@@ -423,8 +423,6 @@ async def test_v2_categories_not_forced_uniform(monkeypatch) -> None:
         "C6_难点与调试",
         "C5_数字与规模",
     }
-
-
 
 
 # ── #152 后置校验(评审 P1:缺失的测试) ──

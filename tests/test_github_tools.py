@@ -220,12 +220,18 @@ async def test_commit_detail_truncates_patch_total() -> None:
                 "author": {"login": "me"},
                 "files": [
                     {
-                        "filename": "a.py", "status": "modified",
-                        "additions": 10, "deletions": 2, "patch": "p" * 6000,
+                        "filename": "a.py",
+                        "status": "modified",
+                        "additions": 10,
+                        "deletions": 2,
+                        "patch": "p" * 6000,
                     },
                     {
-                        "filename": "b.py", "status": "modified",
-                        "additions": 5, "deletions": 1, "patch": "q" * 6000,
+                        "filename": "b.py",
+                        "status": "modified",
+                        "additions": 5,
+                        "deletions": 1,
+                        "patch": "q" * 6000,
                     },
                 ],
             }
