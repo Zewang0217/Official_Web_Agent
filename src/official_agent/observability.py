@@ -211,6 +211,17 @@ class _PiiMaskedLangfuseHandler:
         masked = self._mask_payload(outputs)
         return self._inner.on_chain_end(masked, **kwargs)
 
+    def on_tool_start(self, serialized: Any, input_str: str, **kwargs: Any) -> Any:
+        return self._inner.on_tool_start(serialized, self._mask_payload(input_str), **kwargs)
+
+    def on_tool_end(self, output: Any, **kwargs: Any) -> Any:
+        # #171 评审 P2:工具返回是 trace 原文的最大来源(search_resumes 等
+        # 工具未做返回层脱敏),这里兜底掩一层
+        return self._inner.on_tool_end(self._mask_payload(output), **kwargs)
+
+    def on_chat_model_end(self, response: Any, **kwargs: Any) -> Any:
+        return self._inner.on_chat_model_end(self._mask_payload(response), **kwargs)
+
     def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> Any:
         from official_agent.security.pii import mask_pii
 
