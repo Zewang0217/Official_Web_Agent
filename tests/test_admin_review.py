@@ -80,26 +80,28 @@ def test_queue_zero_filter_queries_hard_zero(
 
             class _Cur:
                 fetchall = lambda self: [  # noqa: E731
-                    {"resume_id": 9, "card_version": 2, "status": "draft",
-                     "hard_zero": True, "total": 0.0, "prompt_version": "v1",
-                     "created_at": None}
+                    {
+                        "resume_id": 9,
+                        "card_version": 2,
+                        "status": "draft",
+                        "hard_zero": True,
+                        "total": 0.0,
+                        "prompt_version": "v1",
+                        "created_at": None,
+                    }
                 ]
 
             return _Cur()
 
     monkeypatch.setattr(ea.evaluation, "_conn", lambda: _Conn())
-    resp = client.get(
-        "/api/agent/admin/evaluation/queue?cycle_id=2026&queue=zero", headers=_AUTH
-    )
+    resp = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026&queue=zero", headers=_AUTH)
     assert resp.status_code == 200
     assert seen["params"] == (2026, 2026)  # #154:外层 cycle + 子查询 user_id 归属
     assert "hard_zero = TRUE" in seen["sql"]
     assert resp.json()["items"][0]["hard_zero"] is True
     assert resp.json()["queue"] == "zero"
 
-    bad = client.get(
-        "/api/agent/admin/evaluation/queue?cycle_id=2026&queue=other", headers=_AUTH
-    )
+    bad = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026&queue=other", headers=_AUTH)
     assert bad.status_code == 400
 
 
@@ -134,13 +136,11 @@ def test_adopt_puts_reviewer_vote_and_marks_adopted(
     async def _fake_gbc():
         return _FakeClient()
 
-    monkeypatch.setattr(
-        "official_agent.tools.readonly.get_backend_client", _fake_gbc
-    )
+    monkeypatch.setattr("official_agent.tools.readonly.get_backend_client", _fake_gbc)
     monkeypatch.setattr(
         ea.evaluation,
-        "latest_scorecard",
-        lambda r, c: {"card_version": 3, "card": {"total": 66.0}, "status": "draft"},
+        "list_scorecards",
+        lambda r, c: [{"card_version": 3, "status": "draft"}],
     )
 
     def _fake_set(r, c, v, status):
@@ -155,6 +155,7 @@ def test_adopt_puts_reviewer_vote_and_marks_adopted(
             json={"resume_id": 9, "cycle_id": 2026, "score": 66},
         )
     assert resp.status_code == 200
+    assert resp.json()["audit_recorded"] is True
     assert captured["path"] == "/api/resumes/9/score"
     assert captured["json"] == {"score": 66}
     assert captured["user_token"] == "reviewer-jwt"  # 评审本人身份,非 AI 服务账号
@@ -162,10 +163,73 @@ def test_adopt_puts_reviewer_vote_and_marks_adopted(
     assert captured.get("audit") is True
 
 
+def test_adopt_missing_card_404_before_any_side_effect(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#180:无卡 → 404 且发生在投票之前,零副作用。"""
+    _install_resolve(monkeypatch, ["resume:audit"])
+
+    vote_called: list = []
+
+    class _SpyClient:
+        async def put_as_user(self, path, json=None, user_token=""):
+            vote_called.append(path)
+            return {}
+
+    async def _fake_gbc():
+        return _SpyClient()
+
+    monkeypatch.setattr("official_agent.tools.readonly.get_backend_client", _fake_gbc)
+    monkeypatch.setattr(ea.evaluation, "list_scorecards", lambda r, c: [])
+    resp = client.post(
+        "/api/agent/admin/evaluation/adopt",
+        headers=_AUTH,
+        json={"resume_id": 9, "cycle_id": 2026, "score": 66},
+    )
+    assert resp.status_code == 404
+    assert vote_called == [], "无卡必须在投票前拒绝"
+
+
+def test_adopt_intent_audit_failure_is_clean_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#180:意图审计失败 → 503"未执行",且投票确实没发生。"""
+    _install_resolve(monkeypatch, ["resume:audit"])
+
+    vote_called: list = []
+
+    class _SpyClient:
+        async def put_as_user(self, path, json=None, user_token=""):
+            vote_called.append(path)
+            return {}
+
+    async def _fake_gbc():
+        return _SpyClient()
+
+    monkeypatch.setattr("official_agent.tools.readonly.get_backend_client", _fake_gbc)
+    monkeypatch.setattr(
+        ea.evaluation,
+        "list_scorecards",
+        lambda r, c: [{"card_version": 3, "status": "draft"}],
+    )
+
+    def _boom(**k):
+        raise RuntimeError("audit down")
+
+    with patch.object(ea.audit, "write_audit", _boom):
+        resp = client.post(
+            "/api/agent/admin/evaluation/adopt",
+            headers=_AUTH,
+            json={"resume_id": 9, "cycle_id": 2026, "score": 66},
+        )
+    assert resp.status_code == 503
+    assert vote_called == [], "意图审计失败时不得投票"
+
+
 def test_adopt_backend_failure_keeps_draft(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """后端投一票失败 → 502,卡保持 draft 可重试(不置 adopted)。"""
+    """后端投一票失败 → 502"投票未送达",卡保持 draft 可重试。"""
     from official_agent.tools.client import BackendError
 
     _install_resolve(monkeypatch, ["resume:audit"])
@@ -178,6 +242,11 @@ def test_adopt_backend_failure_keeps_draft(
         return _FailClient()
 
     monkeypatch.setattr("official_agent.tools.readonly.get_backend_client", _fake_gbc)
+    monkeypatch.setattr(
+        ea.evaluation,
+        "list_scorecards",
+        lambda r, c: [{"card_version": 3, "status": "draft"}],
+    )
     set_called: list = []
     monkeypatch.setattr(
         ea.evaluation,
@@ -190,12 +259,83 @@ def test_adopt_backend_failure_keeps_draft(
         json={"resume_id": 9, "cycle_id": 2026, "score": 66},
     )
     assert resp.status_code == 502
+    assert "投票未送达" in resp.json()["detail"]
     assert set_called == []  # 卡态未动
 
 
-def test_reject_marks_rejected(
+def test_adopt_card_status_failure_reports_vote_landed(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#180:投票落地后卡态更新失败 → 500 且如实说"票已投",不谎报未执行。"""
+    _install_resolve(monkeypatch, ["resume:audit"])
+
+    class _OkClient:
+        async def put_as_user(self, path, json=None, user_token=""):
+            return {}
+
+    async def _fake_gbc():
+        return _OkClient()
+
+    monkeypatch.setattr("official_agent.tools.readonly.get_backend_client", _fake_gbc)
+    monkeypatch.setattr(
+        ea.evaluation,
+        "list_scorecards",
+        lambda r, c: [{"card_version": 3, "status": "draft"}],
+    )
+    monkeypatch.setattr(ea.evaluation, "set_scorecard_status", lambda *a, **k: False)
+    with patch.object(ea.audit, "write_audit", lambda **k: None):
+        resp = client.post(
+            "/api/agent/admin/evaluation/adopt",
+            headers=_AUTH,
+            json={"resume_id": 9, "cycle_id": 2026, "score": 66},
+        )
+    assert resp.status_code == 500
+    assert "投票已送达" in resp.json()["detail"]
+
+
+def test_adopt_result_audit_failure_still_adopted_but_visible(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#180:结果审计失败(票已投、不可撤)→ 200 adopted + audit_recorded=false。"""
+    _install_resolve(monkeypatch, ["resume:audit"])
+
+    class _OkClient:
+        async def put_as_user(self, path, json=None, user_token=""):
+            return {}
+
+    async def _fake_gbc():
+        return _OkClient()
+
+    monkeypatch.setattr("official_agent.tools.readonly.get_backend_client", _fake_gbc)
+    monkeypatch.setattr(
+        ea.evaluation,
+        "list_scorecards",
+        lambda r, c: [{"card_version": 3, "status": "draft"}],
+    )
+    set_calls: list = []
+    monkeypatch.setattr(
+        ea.evaluation,
+        "set_scorecard_status",
+        lambda *a, **k: set_calls.append(a) or True,
+    )
+
+    def _audit_second_fails(**k):
+        if k.get("action", {}).get("op") == "adopt_scorecard":
+            raise RuntimeError("audit down")
+
+    with patch.object(ea.audit, "write_audit", _audit_second_fails):
+        resp = client.post(
+            "/api/agent/admin/evaluation/adopt",
+            headers=_AUTH,
+            json={"resume_id": 9, "cycle_id": 2026, "score": 66},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "adopted"
+    assert resp.json()["audit_recorded"] is False
+    assert set_calls, "卡态仍要置 adopted"
+
+
+def test_reject_marks_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _install_resolve(monkeypatch, ["resume:audit"])
     monkeypatch.setattr(
         ea.evaluation,

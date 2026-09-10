@@ -145,7 +145,9 @@ def test_repeated_stale_recovery_is_stable(cycle_id: int) -> None:
         first = ev_store.requeue_stale_all_cycles(older_than_minutes=0)
         second = ev_store.requeue_stale_all_cycles(older_than_minutes=0)
         assert job_id in [int(r["job_id"]) for r in first]
-        assert [int(r["job_id"]) for r in second].count(job_id) <= 1
+        assert [int(r["job_id"]) for r in second].count(job_id) == 1, (
+            "重复恢复同一 job 应恰好命中一次"
+        )
         row = ev_store.get_job(job_id)
         assert row["attempts"] == baseline_attempts
         with psycopg.connect(PG_URL) as conn:
@@ -156,6 +158,57 @@ def test_repeated_stale_recovery_is_stable(cycle_id: int) -> None:
                 (cycle_id,),
             ).fetchone()
         assert active[0] == 1
+    finally:
+        _cleanup(cycle_id)
+
+
+def test_requeue_skips_failed_when_sibling_active(cycle_id: int) -> None:
+    """#175 守卫分支一:同 (resume, cycle) 已有活跃 job,failed 行不得复活。
+
+    legacy 重复 job 场景:复活旧失败行会撞 uq_eval_job_active_resume,
+    整批恢复失败。守卫必须让失败行保持 failed、活跃行不受影响。"""
+    _cleanup(cycle_id)
+    try:
+        active_id = ev_store.create_jobs([(9018, 518)], cycle_id)[0]
+        with psycopg.connect(PG_URL) as conn:
+            row = conn.execute(
+                "INSERT INTO evaluation_job (resume_id, user_id, cycle_id, status, "
+                "attempts) VALUES (9018, 518, %s, 'failed', 0) RETURNING job_id",
+                (cycle_id,),
+            ).fetchone()
+        failed_id = int(row[0])
+        rows = ev_store.requeue_stale_all_cycles(older_than_minutes=0)
+        ids = [int(r["job_id"]) for r in rows]
+        assert active_id in ids
+        assert failed_id not in ids, "兄弟活跃时 failed 行不得复活"
+        assert ev_store.get_job(failed_id)["status"] == "failed"
+    finally:
+        _cleanup(cycle_id)
+
+
+def test_requeue_failed_flips_only_newest_in_group(cycle_id: int) -> None:
+    """#175 守卫分支二:同组多条 failed 只翻 job_id 最新的一条。
+
+    两条失败行在同一 UPDATE 里同时变活跃会撞唯一索引、整批失败;
+    正确语义是只复活最新一条(复评以最新为准),旧的留 failed。"""
+    _cleanup(cycle_id)
+    try:
+        with psycopg.connect(PG_URL) as conn:
+            ev_store.ensure_evaluation_job_table(conn)
+            ids = []
+            for _ in range(2):
+                row = conn.execute(
+                    "INSERT INTO evaluation_job (resume_id, user_id, cycle_id, "
+                    "status, attempts) VALUES (9019, 519, %s, 'failed', 0) "
+                    "RETURNING job_id",
+                    (cycle_id,),
+                ).fetchone()
+                ids.append(int(row[0]))
+        older, newer = sorted(ids)
+        retried = ev_store.requeue_failed(cycle_id)
+        assert retried == [newer], f"只翻组内最新失败行,实际 {retried}"
+        assert ev_store.get_job(older)["status"] == "failed"
+        assert ev_store.get_job(newer)["status"] == "pending"
     finally:
         _cleanup(cycle_id)
 

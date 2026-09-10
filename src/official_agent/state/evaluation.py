@@ -219,6 +219,17 @@ def ensure_evaluation_job_integrity(conn: psycopg.Connection[dict[str, Any]]) ->
     )
 
 
+def ensure_evaluation_job_ready() -> None:
+    """启动自举(#175 评审):建表 + 去重 legacy 重复活跃 job + 建唯一索引。
+
+    requeue 守卫只防"恢复时撞索引";重复活跃行的消除靠这里。lifespan 在
+    启动恢复**之前**调用,保证恢复面对的是去重后的活跃集。
+    """
+    with _conn() as conn:
+        ensure_evaluation_job_table(conn)
+        ensure_evaluation_job_integrity(conn)
+
+
 def create_jobs(items: list[tuple[int, int]], cycle_id: int) -> list[int]:
     """每份简历一行 job;幂等(闸门2):同 (resume, cycle) 已有活跃 job → 返回已有 job_id。
 
@@ -338,8 +349,9 @@ def requeue_failed(cycle_id: int) -> list[int]:
     """失败 job 重回 pending(手动重试入口)。
 
     闸门3:attempts 达 _MAX_ATTEMPTS 的失败 job 不再自动重排(人工介入)。
-    #175:同 (resume, cycle) 已有其他活跃 job 的旧失败行不复活——否则
-    旧库重复 job 场景下撞 uq_eval_job_active_resume,恢复整批失败。
+    #175:同 (resume, cycle) 已有其他活跃 job 的旧失败行不复活;同组多条
+    失败行只翻 job_id 最新的一条——两条失败行在同一 UPDATE 里同时变活跃
+    会撞 uq_eval_job_active_resume,整批恢复失败。
     """
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
@@ -354,9 +366,17 @@ def requeue_failed(cycle_id: int) -> list[int]:
                     AND j2.status IN ('pending', 'running')
                     AND j2.job_id <> evaluation_job.job_id
               )
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_job j3
+                  WHERE j3.resume_id = evaluation_job.resume_id
+                    AND j3.cycle_id = evaluation_job.cycle_id
+                    AND j3.status = 'failed'
+                    AND j3.attempts < %s
+                    AND j3.job_id > evaluation_job.job_id
+              )
             RETURNING job_id
             """,
-            (cycle_id, _MAX_ATTEMPTS),
+            (cycle_id, _MAX_ATTEMPTS, _MAX_ATTEMPTS),
         ).fetchall()
     return [int(r["job_id"]) for r in rows]
 
@@ -383,7 +403,8 @@ def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
             """,
             (cycle_id, _MAX_ATTEMPTS, str(older_than_minutes)),
         )
-        # 2) 未超限的僵 job 回 pending(同 (resume, cycle) 已有其他活跃则跳过)
+        # 2) 未超限的僵 job 回 pending。#175 双守卫:兄弟已活跃不复活;
+        #    同组多条失败行只翻最新一条(防同语句双激活撞唯一索引)
         rows = conn.execute(
             """
             UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
@@ -397,9 +418,27 @@ def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
                     AND j2.status IN ('pending', 'running')
                     AND j2.job_id <> evaluation_job.job_id
               )
+              AND NOT (
+                  evaluation_job.status = 'failed'
+                  AND EXISTS (
+                      SELECT 1 FROM evaluation_job j3
+                      WHERE j3.resume_id = evaluation_job.resume_id
+                        AND j3.cycle_id = evaluation_job.cycle_id
+                        AND j3.status = 'failed'
+                        AND j3.attempts < %s
+                        AND j3.updated_at < now() - (%s || ' minutes')::interval
+                        AND j3.job_id > evaluation_job.job_id
+                  )
+              )
             RETURNING job_id
             """,
-            (cycle_id, _MAX_ATTEMPTS, str(older_than_minutes)),
+            (
+                cycle_id,
+                _MAX_ATTEMPTS,
+                str(older_than_minutes),
+                _MAX_ATTEMPTS,
+                str(older_than_minutes),
+            ),
         ).fetchall()
     return [int(r["job_id"]) for r in rows]
 
@@ -425,7 +464,8 @@ def requeue_stale_all_cycles(*, older_than_minutes: int = 10) -> list[dict[str, 
             """,
             (_MAX_ATTEMPTS, str(older_than_minutes)),
         )
-        # 未超限僵 job 回 pending(同 (resume, cycle) 已有其他活跃则跳过)
+        # 未超限僵 job 回 pending。#175 双守卫:兄弟已活跃不复活;
+        # 同组多条失败行只翻最新一条(防同语句双激活撞唯一索引)
         rows = conn.execute(
             """
             UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
@@ -439,9 +479,26 @@ def requeue_stale_all_cycles(*, older_than_minutes: int = 10) -> list[dict[str, 
                     AND j2.status IN ('pending', 'running')
                     AND j2.job_id <> evaluation_job.job_id
               )
+              AND NOT (
+                  evaluation_job.status = 'failed'
+                  AND EXISTS (
+                      SELECT 1 FROM evaluation_job j3
+                      WHERE j3.resume_id = evaluation_job.resume_id
+                        AND j3.cycle_id = evaluation_job.cycle_id
+                        AND j3.status = 'failed'
+                        AND j3.attempts < %s
+                        AND j3.updated_at < now() - (%s || ' minutes')::interval
+                        AND j3.job_id > evaluation_job.job_id
+                  )
+              )
             RETURNING job_id, cycle_id
             """,
-            (_MAX_ATTEMPTS, str(older_than_minutes)),
+            (
+                _MAX_ATTEMPTS,
+                str(older_than_minutes),
+                _MAX_ATTEMPTS,
+                str(older_than_minutes),
+            ),
         ).fetchall()
     return [dict(r) for r in rows]
 

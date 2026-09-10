@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from official_agent.state.audit import ensure_audit_table
     from official_agent.state.pg import get_checkpointer
     from official_agent.state.threads import ensure_agent_threads_table
+
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
         try:
@@ -44,6 +45,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             conversation.ensure_conversation_table()
             config_store.ensure_config_table()
             ensure_audit_table()
+            # #175:去重 legacy 重复活跃 job + 建部分唯一索引,必须先于恢复
+            from official_agent.state.evaluation import ensure_evaluation_job_ready
+
+            ensure_evaluation_job_ready()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
         # 闸门3 启动自动恢复:进程重启后,PG 里残留的 pending/running job
@@ -109,4 +114,5 @@ def create_app() -> FastAPI:
         """探活(不鉴权)。checkpointer 就绪(PG 连通)才算健康。"""
         ready = getattr(app.state, "checkpointer", None) is not None
         return {"status": "ok" if ready else "degraded"}
+
     return app

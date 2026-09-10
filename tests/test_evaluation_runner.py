@@ -56,7 +56,8 @@ def test_requeue_failed_scoped_by_cycle_and_skips_exhausted(monkeypatch) -> None
     sql, params = conn.execute.call_args.args
     assert "status = 'failed'" in sql and "RETURNING job_id" in sql
     assert "attempts < %s" in sql
-    assert params == (2026, ev_store._MAX_ATTEMPTS)
+    # #175:参数含双上限(自身资格 + 同组更新失败行资格)
+    assert params == (2026, ev_store._MAX_ATTEMPTS, ev_store._MAX_ATTEMPTS)
 
 
 def test_requeue_failed_skips_attempts_exhausted(monkeypatch) -> None:
@@ -67,7 +68,7 @@ def test_requeue_failed_skips_attempts_exhausted(monkeypatch) -> None:
     assert ev_store.requeue_failed(2026) == []
     sql, params = conn.execute.call_args.args
     assert "attempts < %s" in sql
-    assert params == (2026, ev_store._MAX_ATTEMPTS)
+    assert params == (2026, ev_store._MAX_ATTEMPTS, ev_store._MAX_ATTEMPTS)
 
 
 # ── runner 状态机(fetch/评分注入) ────────────────────────
