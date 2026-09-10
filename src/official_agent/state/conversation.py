@@ -337,3 +337,19 @@ def session_overview(thread_ids: list[str]) -> dict[str, dict[str, Any]]:
             "preview": r["preview"] or "",
         }
     return out
+
+
+def delete_thread_conversations(thread_id: str) -> int:
+    """物理删除某会话的全部对话日志行(#171 删除闭环;预览/摘要虽已脱敏,
+    删除语义要求面面俱到)。返回删除行数。"""
+    import psycopg
+
+    from official_agent.config import get_settings
+
+    ensure_conversation_table()
+    with psycopg.connect(get_settings().postgres_url) as conn:
+        cur = conn.execute(
+            "DELETE FROM agent_conversation_log WHERE thread_id = %s",
+            (thread_id,),
+        )
+        return max(cur.rowcount, 0)

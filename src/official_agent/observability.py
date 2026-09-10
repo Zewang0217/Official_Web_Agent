@@ -131,7 +131,7 @@ def langfuse_callbacks() -> list[BaseCallbackHandler]:
     return [handler]
 
 
-def _build_handler(settings: Any) -> BaseCallbackHandler:
+def _build_handler(settings: Any) -> Any:
     from langfuse import Langfuse
     from langfuse.langchain import CallbackHandler
 
@@ -140,4 +140,46 @@ def _build_handler(settings: Any) -> BaseCallbackHandler:
         secret_key=settings.langfuse_secret_key,
         host=settings.langfuse_host,
     )
-    return CallbackHandler()
+    return _PiiMaskedLangfuseHandler(CallbackHandler())
+
+
+class _PiiMaskedLangfuseHandler:
+    """#171:进 Langfuse 前对 prompt/消息文本统一脱敏的 handler 包装。
+
+    checkpointer 仍保留对话原文(会话连续性与 #171 删除语义的前提);
+    trace 面不再出现可识别原文(手机/身份证/邮箱/QQ/学号,规则见
+    security/pii.py)。包装而非继承:langfuse CallbackHandler 随 SDK
+    版本演进,只覆写消息入口两个方法,其余原样委托。
+
+    注意必须**拷贝**消息对象再改 content——callback 拿到的是图状态里
+    同一批对象,就地改会污染真实对话历史。
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def _masked_copy(self, message: Any) -> Any:
+        from official_agent.security.pii import mask_pii
+
+        content = getattr(message, "content", None)
+        if not isinstance(content, str) or not content:
+            return message
+        masked = mask_pii(content)
+        if masked == content:
+            return message
+        try:
+            return message.model_copy(update={"content": masked})
+        except Exception:  # noqa: BLE001 — 拷贝失败宁可不改,不污染原对象
+            return message
+
+    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> Any:
+        masked = [[self._masked_copy(m) for m in batch] for batch in messages]
+        return self._inner.on_chat_model_start(serialized, masked, **kwargs)
+
+    def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> Any:
+        from official_agent.security.pii import mask_pii
+
+        return self._inner.on_llm_start(serialized, [mask_pii(p) for p in prompts], **kwargs)

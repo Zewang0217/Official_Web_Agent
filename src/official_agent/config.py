@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     model_call_global_concurrency: int = 4
     model_gate_acquire_timeout: int = 15  # 秒;闸满等待上限,超过回 busy
 
+    # 会话保留 TTL(#171):软删档案超期后物理清理(连带 checkpoint/对话日志)。
+    # **0 = 关闭**——保留天数是 #57 数据留存 ADR 的拍板项,ADR 落地前不启用。
+    thread_retention_days: int = 0
+
     # FastAPI 服务(INF-04):官网候选人客服通道
     agent_host: str = "127.0.0.1"
     agent_port: int = 8001

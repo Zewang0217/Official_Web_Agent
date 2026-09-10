@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
@@ -920,6 +920,42 @@ async def get_my_session_messages(
     return {"thread_id": thread_id, "messages": messages}
 
 
+@router.delete("/sessions/{thread_id}")
+async def delete_my_session(
+    request: Request,
+    thread_id: str,
+    auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
+) -> Response:
+    """用户删除自己的会话(#171 删除闭环):档案行物理 DELETE + checkpoint
+    三表物理清理 + 对话日志物理清理;进程内运行时对象同步移除。
+
+    Langfuse trace 的删除需经其外部 API(自托管/云与 trace 关联键未拍板,
+    #57)——本端点删除后 trace 已无可关联档案,残余 trace 按 #57 留存策略
+    过期,运维手册见 docs/eval-observability.md 同级说明。"""
+    from official_agent.state.conversation import delete_thread_conversations
+    from official_agent.state.pg import purge_thread_checkpoints
+    from official_agent.state.threads import hard_delete_thread, resolve_thread
+
+    identity, _ = auth
+    user_id = identity.get("user_id")
+    if user_id is None or resolve_thread(thread_id, user_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    deleted = await asyncio.to_thread(hard_delete_thread, thread_id, owner_user_id=int(user_id))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        await asyncio.to_thread(purge_thread_checkpoints, thread_id)
+        await asyncio.to_thread(delete_thread_conversations, thread_id)
+    except Exception as exc:  # noqa: BLE001 — 删除不完整必须如实暴露
+        raise HTTPException(
+            status_code=500, detail="会话已删除但历史数据清理失败,请稍后重试或联系管理员"
+        ) from exc
+    async with _sessions_lock:
+        _sessions.pop(thread_id, None)
+        _sessions_last_access.pop(thread_id, None)
+    return Response(status_code=204)
+
+
 @router.get("/admin/sessions")
 async def get_admin_sessions(
     request: Request,
@@ -959,15 +995,34 @@ async def get_admin_sessions(
 async def get_admin_session_messages(
     request: Request,
     thread_id: str,
-    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+    identity: Annotated[ResolvedIdentity, Depends(_require_monitor)],
 ) -> dict[str, Any]:
     """管理员回看任意会话原文(G3);不存在 404。已终结会话原文仍可查
-    (status 标注返回),供运营排查——区别于用户侧 resolve_thread 拒绝复活。"""
+    (status 标注返回),供运营排查——区别于用户侧 resolve_thread 拒绝复活。
+    #171:管理员原文读取落审计(actor/thread/时间),fail-open 不阻断读取。"""
+    from official_agent.state.audit import write_audit
     from official_agent.state.threads import get_thread
 
     rec = get_thread(thread_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        await asyncio.to_thread(
+            write_audit,
+            thread_id=thread_id,
+            acting_user_id=int(identity.get("user_id") or 0),
+            channel="web",
+            agent="admin-console",
+            action={
+                "op": "admin_read_transcript",
+                "thread_id": thread_id,
+                "owner_user_id": rec.owner_user_id,
+            },
+            decision="admin:read_transcript",
+            result=f"管理员回看会话原文(owner={rec.owner_user_id},status={rec.status})",
+        )
+    except Exception:  # noqa: BLE001 — 读取审计缺失必须可见但不阻断
+        logger.warning("管理员原文读取审计写入失败(thread=%s)", thread_id, exc_info=True)
     messages = await _fetch_transcript(request, thread_id)
     return {
         "thread_id": thread_id,

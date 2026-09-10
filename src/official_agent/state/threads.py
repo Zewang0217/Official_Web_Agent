@@ -196,3 +196,31 @@ def _record(row: dict[str, Any]) -> ThreadRecord:
         created_at=row["created_at"],
         deleted_at=row["deleted_at"],
     )
+
+
+def hard_delete_thread(thread_id: str, *, owner_user_id: int | None = None) -> bool:
+    """物理删除会话档案(#171):默认限定属主(用户自删);owner_user_id=None
+    为运维/TTL 清理通道。只删 agent_threads 档案行;checkpoint/对话日志/
+    trace 的清理由调用方联动执行,面面俱到才算删干净。"""
+    sql = "DELETE FROM agent_threads WHERE thread_id = %s"
+    params: list[Any] = [thread_id]
+    if owner_user_id is not None:
+        sql += " AND owner_user_id = %s"
+        params.append(owner_user_id)
+    with _conn() as conn:
+        cur = conn.execute(sql, tuple(params))
+        return cur.rowcount > 0
+
+
+def list_expired_soft_deleted(older_than_days: int) -> list[str]:
+    """列出软删且超过保留期的 thread_id(#171 TTL;0 天=关闭,返回空)。"""
+    if older_than_days <= 0:
+        return []
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT thread_id FROM agent_threads "
+            "WHERE status = %s AND deleted_at < now() - (%s || ' days')::interval "
+            "LIMIT 500",
+            (_STATUS_TERMINATED, str(older_than_days)),
+        ).fetchall()
+    return [str(r["thread_id"]) for r in rows]

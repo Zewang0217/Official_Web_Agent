@@ -51,3 +51,26 @@ async def get_checkpointer() -> AsyncIterator[AsyncPostgresSaver]:
         yield saver
     finally:
         await pool.close()
+
+
+def purge_thread_checkpoints(thread_id: str) -> int:
+    """物理删除某 thread 的全部 checkpoint 数据(#171 删除闭环)。
+
+    LangGraph PostgresSaver 三表(checkpoints / checkpoint_writes /
+    checkpoint_blobs)都按 thread_id 维度;缺表容错(旧库未建全时跳过,
+    与 saver.setup() 幂等建表解耦)。返回删除总行数(排障/审计用)。
+    """
+    import psycopg
+
+    deleted = 0
+    with psycopg.connect(get_settings().postgres_url) as conn:
+        for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+            try:
+                cur = conn.execute(
+                    f"DELETE FROM {table} WHERE thread_id = %s",  # noqa: S608
+                    (thread_id,),
+                )
+                deleted += max(cur.rowcount, 0)
+            except psycopg.errors.UndefinedTable:
+                conn.rollback()
+    return deleted
