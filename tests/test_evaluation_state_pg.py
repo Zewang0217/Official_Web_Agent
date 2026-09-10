@@ -28,9 +28,7 @@ def _pg_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _pg_available(), reason="需要真 PostgreSQL(POSTGRES_URL)"
-)
+pytestmark = pytest.mark.skipif(not _pg_available(), reason="需要真 PostgreSQL(POSTGRES_URL)")
 
 
 @pytest.fixture
@@ -108,6 +106,60 @@ def test_requeue_stale_recovers_within_cap(cycle_id: int) -> None:
         _cleanup(cycle_id)
 
 
+def test_requeue_stale_all_cycles_returns_original_cycle(cycle_id: int) -> None:
+    """#175:全量恢复返回行必须携带原 cycle_id,多周期互不串线。
+
+    runner 曾把整行当 job_id、cycle 硬编码 0 派发,本测试钉住状态层契约:
+    每行 {job_id, cycle_id} 与建 job 时的周期一致。"""
+    other_cycle = (cycle_id + 1) % 2_000_000_000 + 1
+    _cleanup(cycle_id)
+    _cleanup(other_cycle)
+    try:
+        job_a = ev_store.create_jobs([(9014, 514)], cycle_id)[0]
+        job_b = ev_store.create_jobs([(9015, 515)], other_cycle)[0]
+        ev_store.mark_job(job_a, "running")
+        ev_store.mark_job(job_b, "running")
+        rows = {
+            int(r["job_id"]): int(r["cycle_id"])
+            for r in ev_store.requeue_stale_all_cycles(older_than_minutes=0)
+        }
+        assert rows.get(job_a) == cycle_id
+        assert rows.get(job_b) == other_cycle
+        assert ev_store.get_job(job_a)["status"] == "pending"
+        assert ev_store.get_job(job_b)["status"] == "pending"
+    finally:
+        _cleanup(cycle_id)
+        _cleanup(other_cycle)
+
+
+def test_repeated_stale_recovery_is_stable(cycle_id: int) -> None:
+    """#175:重复恢复不产生第二条活跃 job、不重复累加 attempts。
+
+    同一 (resume, cycle) 连续两轮全量恢复:活跃 job 唯一;attempts 在
+    进入 running 时已 +1,requeue 只改状态,两轮恢复后不增长。"""
+    _cleanup(cycle_id)
+    try:
+        job_id = ev_store.create_jobs([(9016, 516)], cycle_id)[0]
+        ev_store.mark_job(job_id, "running")
+        baseline_attempts = ev_store.get_job(job_id)["attempts"]
+        first = ev_store.requeue_stale_all_cycles(older_than_minutes=0)
+        second = ev_store.requeue_stale_all_cycles(older_than_minutes=0)
+        assert job_id in [int(r["job_id"]) for r in first]
+        assert [int(r["job_id"]) for r in second].count(job_id) <= 1
+        row = ev_store.get_job(job_id)
+        assert row["attempts"] == baseline_attempts
+        with psycopg.connect(PG_URL) as conn:
+            active = conn.execute(
+                "SELECT count(*) FROM evaluation_job "
+                "WHERE resume_id = 9016 AND cycle_id = %s "
+                "AND status IN ('pending','running')",
+                (cycle_id,),
+            ).fetchone()
+        assert active[0] == 1
+    finally:
+        _cleanup(cycle_id)
+
+
 def test_integrity_dedupes_existing_active(cycle_id: int) -> None:
     """闸门2 加固:旧库已有重复活跃 job 时,integrity 去重后能建唯一索引。"""
     _cleanup(cycle_id)
@@ -115,13 +167,10 @@ def test_integrity_dedupes_existing_active(cycle_id: int) -> None:
         # 绕过 create_jobs 的幂等,直接插两条活跃 job 模拟旧库脏数据
         with psycopg.connect(PG_URL) as conn:
             ev_store.ensure_evaluation_job_table(conn)
-            conn.execute(
-                "DROP INDEX IF EXISTS uq_eval_job_active_resume"
-            )
+            conn.execute("DROP INDEX IF EXISTS uq_eval_job_active_resume")
             for _ in range(2):
                 conn.execute(
-                    "INSERT INTO evaluation_job (resume_id, user_id, cycle_id) "
-                    "VALUES (%s, %s, %s)",
+                    "INSERT INTO evaluation_job (resume_id, user_id, cycle_id) VALUES (%s, %s, %s)",
                     (9005, 505, cycle_id),
                 )
         with psycopg.connect(PG_URL) as conn:

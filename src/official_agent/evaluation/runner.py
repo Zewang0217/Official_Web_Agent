@@ -201,9 +201,7 @@ class EvaluationRunner:
                 result=f"提交 {len(job_ids)} 个初筛 job",
             )
         except Exception:  # noqa: BLE001 — 合规记录丢失必须可见
-            logging.getLogger(__name__).warning(
-                "触发审计写入失败(jobs=%s)", job_ids, exc_info=True
-            )
+            logging.getLogger(__name__).warning("触发审计写入失败(jobs=%s)", job_ids, exc_info=True)
         return job_ids
 
     async def _run_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
@@ -221,9 +219,7 @@ class EvaluationRunner:
             version: int | None = None
             qbank_status = "skipped"
             try:
-                fetched_resume_id, fields = await fetch_scoring_fields(
-                    job["user_id"], cycle_id
-                )
+                fetched_resume_id, fields = await fetch_scoring_fields(job["user_id"], cycle_id)
                 # 闸门1 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
                 # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
                 if fetched_resume_id != resume_id:
@@ -335,8 +331,7 @@ class EvaluationRunner:
                     },
                     decision="system:auto",
                     result=(
-                        f"卡 v{version},总分 {card.get('total')}"
-                        "(AI 参考分,未写 resume_score)"
+                        f"卡 v{version},总分 {card.get('total')}(AI 参考分,未写 resume_score)"
                         if card
                         else "生成完成"
                     ),
@@ -363,17 +358,20 @@ class EvaluationRunner:
             self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=0))
         return job_ids
 
-    async def recover_stale_on_startup(self) -> list[int]:
+    async def recover_stale_on_startup(self, *, older_than_minutes: int = 10) -> list[int]:
         """闸门3 启动自动恢复:全量扫残留(不限周期),重派未超上限的僵 job。
 
-        requeue_stale 需要 cycle_id;启动时对数据库里所有活跃 j 调用。
+        requeue_stale_all_cycles 返回 [{job_id, cycle_id}](#175):恢复必须在
+        **原 cycle** 派发——曾把整行 dict 当 job_id、cycle 硬编码 0,多周期
+        数据下恢复必错位。返回重派的 job_id 列表。
         """
-        job_ids = await asyncio.to_thread(
+        rows = await asyncio.to_thread(
             evaluation.requeue_stale_all_cycles,
+            older_than_minutes=older_than_minutes,
         )
-        for job_id in job_ids:
-            self._spawn(self._run_job(job_id, 0, trigger_user_id=0))
-        return job_ids
+        for row in rows:
+            self._spawn(self._run_job(int(row["job_id"]), int(row["cycle_id"]), trigger_user_id=0))
+        return [int(row["job_id"]) for row in rows]
 
 
 _runner: EvaluationRunner | None = None

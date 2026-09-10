@@ -152,6 +152,7 @@ def set_scorecard_status(resume_id: int, cycle_id: int, version: int, status: st
 
 # ── B2 执行组织(#126):job 状态表 + 进程内 runner 的持久态 ────────────────
 
+
 def ensure_evaluation_job_table(conn: psycopg.Connection[dict[str, Any]]) -> None:
     """幂等建 evaluation_job;与 scorecard 同库同自举纪律。"""
     conn.execute(
@@ -173,9 +174,7 @@ def ensure_evaluation_job_table(conn: psycopg.Connection[dict[str, Any]]) -> Non
         """
     )
     # 旧库自举:qbank_status 列对已存在表补加(闸门6)
-    conn.execute(
-        "ALTER TABLE evaluation_job ADD COLUMN IF NOT EXISTS qbank_status text"
-    )
+    conn.execute("ALTER TABLE evaluation_job ADD COLUMN IF NOT EXISTS qbank_status text")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_eval_job_active_updated
@@ -184,8 +183,7 @@ def ensure_evaluation_job_table(conn: psycopg.Connection[dict[str, Any]]) -> Non
         """
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_eval_job_cycle "
-        "ON evaluation_job (cycle_id, status)"
+        "CREATE INDEX IF NOT EXISTS idx_eval_job_cycle ON evaluation_job (cycle_id, status)"
     )
 
 
@@ -340,12 +338,24 @@ def requeue_failed(cycle_id: int) -> list[int]:
     """失败 job 重回 pending(手动重试入口)。
 
     闸门3:attempts 达 _MAX_ATTEMPTS 的失败 job 不再自动重排(人工介入)。
+    #175:同 (resume, cycle) 已有其他活跃 job 的旧失败行不复活——否则
+    旧库重复 job 场景下撞 uq_eval_job_active_resume,恢复整批失败。
     """
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
         rows = conn.execute(
-            "UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now() "
-            "WHERE cycle_id = %s AND status = 'failed' AND attempts < %s RETURNING job_id",
+            """
+            UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
+            WHERE cycle_id = %s AND status = 'failed' AND attempts < %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_job j2
+                  WHERE j2.resume_id = evaluation_job.resume_id
+                    AND j2.cycle_id = evaluation_job.cycle_id
+                    AND j2.status IN ('pending', 'running')
+                    AND j2.job_id <> evaluation_job.job_id
+              )
+            RETURNING job_id
+            """,
             (cycle_id, _MAX_ATTEMPTS),
         ).fetchall()
     return [int(r["job_id"]) for r in rows]
@@ -356,7 +366,8 @@ def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
 
     时限防误伤:刚提交的 pending/running 有活任务在跑,重入队会双跑。
     闸门3:attempts 达到 _MAX_ATTEMPTS 的 job 不再自动重排(标 failed 交人工),
-    避免死循环无限重试。
+    避免死循环无限重试。#175:同 (resume, cycle) 已有其他活跃 job 的行不
+    重排,防 legacy 重复 job 撞部分唯一索引。
     """
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
@@ -372,13 +383,20 @@ def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
             """,
             (cycle_id, _MAX_ATTEMPTS, str(older_than_minutes)),
         )
-        # 2) 未超限的僵 job 回 pending
+        # 2) 未超限的僵 job 回 pending(同 (resume, cycle) 已有其他活跃则跳过)
         rows = conn.execute(
             """
             UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
             WHERE cycle_id = %s AND status IN ('failed', 'pending', 'running')
               AND attempts < %s
               AND updated_at < now() - (%s || ' minutes')::interval
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_job j2
+                  WHERE j2.resume_id = evaluation_job.resume_id
+                    AND j2.cycle_id = evaluation_job.cycle_id
+                    AND j2.status IN ('pending', 'running')
+                    AND j2.job_id <> evaluation_job.job_id
+              )
             RETURNING job_id
             """,
             (cycle_id, _MAX_ATTEMPTS, str(older_than_minutes)),
@@ -390,6 +408,8 @@ def requeue_stale_all_cycles(*, older_than_minutes: int = 10) -> list[dict[str, 
     """闸门3 启动自动恢复:不限周期,把超时限的僵 job 全部回 pending。
 
     返回 job_id + cycle_id 供派发;attempts 达上限的落 failed 交人工。
+    #175:同 (resume, cycle) 已有其他活跃 job 的行不重排,防 legacy
+    重复 job 在恢复时撞部分唯一索引、整批恢复失败。
     """
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
@@ -405,13 +425,20 @@ def requeue_stale_all_cycles(*, older_than_minutes: int = 10) -> list[dict[str, 
             """,
             (_MAX_ATTEMPTS, str(older_than_minutes)),
         )
-        # 未超限僵 job 回 pending
+        # 未超限僵 job 回 pending(同 (resume, cycle) 已有其他活跃则跳过)
         rows = conn.execute(
             """
             UPDATE evaluation_job SET status = 'pending', error = NULL, updated_at = now()
             WHERE status IN ('failed', 'pending', 'running')
               AND attempts < %s
               AND updated_at < now() - (%s || ' minutes')::interval
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_job j2
+                  WHERE j2.resume_id = evaluation_job.resume_id
+                    AND j2.cycle_id = evaluation_job.cycle_id
+                    AND j2.status IN ('pending', 'running')
+                    AND j2.job_id <> evaluation_job.job_id
+              )
             RETURNING job_id, cycle_id
             """,
             (_MAX_ATTEMPTS, str(older_than_minutes)),

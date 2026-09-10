@@ -39,11 +39,7 @@ def test_create_jobs_select_first_then_insert(monkeypatch) -> None:
     monkeypatch.setattr(ev_store, "_conn", lambda: conn2)
     ids2 = ev_store.create_jobs([(11, 101)], cycle_id=2026)
     assert ids2 == [7]
-    inserts = [
-        c
-        for c in conn2.execute.call_args_list
-        if "INSERT INTO evaluation_job" in c.args[0]
-    ]
+    inserts = [c for c in conn2.execute.call_args_list if "INSERT INTO evaluation_job" in c.args[0]]
     assert len(inserts) == 0  # 复用已有活跃 job,无新 INSERT
 
 
@@ -208,6 +204,34 @@ def test_spawn_keeps_task_references() -> None:
         loop.close()
 
 
+@pytest.mark.asyncio
+async def test_recover_stale_dispatches_with_original_cycle(monkeypatch) -> None:
+    """#175:启动恢复必须按行内原 (job_id, cycle_id) 派发。
+
+    曾把 requeue_stale_all_cycles 返回的整行 dict 当 job_id、cycle 硬编码 0
+    ——多周期数据下恢复必错位。"""
+    rows = [
+        {"job_id": 7, "cycle_id": 2026},
+        {"job_id": 8, "cycle_id": 2027},
+    ]
+    dispatched: list[tuple[int, int]] = []
+    spawned: list = []
+
+    async def _record_run(
+        self, job_id: int, cycle_id: int, *, trigger_user_id: int
+    ) -> None:
+        dispatched.append((job_id, cycle_id))
+
+    monkeypatch.setattr(ev_runner.evaluation, "requeue_stale_all_cycles", lambda **k: rows)
+    monkeypatch.setattr(EvaluationRunner, "_run_job", _record_run)
+    monkeypatch.setattr(EvaluationRunner, "_spawn", lambda self, coro: spawned.append(coro))
+    runner = EvaluationRunner()
+    job_ids = await runner.recover_stale_on_startup(older_than_minutes=0)
+    await asyncio.gather(*spawned)
+    assert job_ids == [7, 8]
+    assert dispatched == [(7, 2026), (8, 2027)]
+
+
 async def _spawn_probe(runner: EvaluationRunner) -> None:
     async def _noop():
         await asyncio.sleep(0)
@@ -248,6 +272,7 @@ def test_attempts_only_bumps_on_running(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_failure_marks_full_timeline_and_audits() -> None:
     """B2 评审 P2:失败用例断言完整时序;触发审计被调用。"""
+
     async def _boom(user_id, cycle_id):
         raise RuntimeError("backend down")
 
@@ -331,7 +356,8 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
     monkeypatch.setattr(ev_runner, "fetch_candidate_github", _fetch_github)
     monkeypatch.setattr("official_agent.evaluation.bundle.run_bundle", _bundle)
     monkeypatch.setattr(
-        "official_agent.state.qbank.save_qbank", lambda **k: 3  # 版本 3
+        "official_agent.state.qbank.save_qbank",
+        lambda **k: 3,  # 版本 3
     )
     monkeypatch.setattr("official_agent.state.conversation.write_conversation", _write_conversation)
 
