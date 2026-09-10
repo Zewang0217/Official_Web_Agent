@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -33,7 +34,7 @@ from official_agent.graphs.assistant.compression import (
 )
 from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
-from official_agent.state.threads import create_thread, new_thread_id
+from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError
 from official_agent.tools.readonly import asker_scope
 
@@ -73,11 +74,32 @@ class _SessionState:
         self.turn_lock = asyncio.Lock()
 
 
-# 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本 INF-11)。
-# NOTE: 无上限无过期——淘汰/限流留给 M3 会话层(Ably 调研):断线跨端/取消恢复
-# 需要会话层,届时换持久会话而非进程内存表。
-_sessions: dict[str, _SessionState] = {}
+# 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本 INF-11,
+# 扩副本前不得依赖进程内表做权限判断——恢复走 PG 档案 resolve_thread,#169)。
+# #169:有界 TTL+LRU——超容/空闲过期只淘汰运行时对象;会话档案与 checkpoint
+# 在 PG,淘汰后携原 session_id 重入会走 resolve_thread 恢复路径,上下文不丢。
+_sessions: OrderedDict[str, _SessionState] = OrderedDict()
+_sessions_last_access: dict[str, float] = {}
 _sessions_lock = asyncio.Lock()
+
+# 恢复拒绝的统一文案:不存在/跨属主/已终结不区分(SEC-07 防会话枚举翻看)
+_SESSION_RESUME_REJECT = "会话不存在、已结束或无权访问"
+
+
+def _evict_sessions_locked(now: float) -> None:
+    """TTL+LRU 淘汰(调用方持 _sessions_lock;#169)。只删运行时,不碰 PG。"""
+    from official_agent.config import get_settings
+
+    settings = get_settings()
+    ttl = max(int(settings.session_registry_ttl_seconds), 1)
+    cap = max(int(settings.session_registry_max), 1)
+    expired = [sid for sid, ts in _sessions_last_access.items() if now - ts > ttl]
+    for sid in expired:
+        _sessions.pop(sid, None)
+        _sessions_last_access.pop(sid, None)
+    while len(_sessions) > cap:
+        sid, _ = _sessions.popitem(last=False)
+        _sessions_last_access.pop(sid, None)
 
 
 async def _authenticate(request: Request, authorization: Annotated[str | None, Header()] = None):
@@ -108,11 +130,15 @@ async def _get_or_create_session(
     """取会话;无则(或未给)新建并建档。同一 session_id 只能被同 user 续传(SEC-07)。
 
     返回 (session, is_new):is_new=True 表示本会话是进程内新建(首轮须注身份前缀),
-    False 表示续传既有会话。进程重启后带旧 session_id 续传会命中新建分支 → is_new
-    误判 True,但身份注入幂等(同身份重注无害),可接受;不依赖 aget_state
-    (LangGraph 对无 checkpoint 的 thread 可能返回非 None,导致 is_new 恒 False,
-    身份永不在首轮注入——实测坑)。
+    False 表示续传既有会话。不依赖 aget_state(LangGraph 对无 checkpoint 的 thread
+    可能返回非 None,导致 is_new 恒 False,身份永不在首轮注入——实测坑)。
+
+    #169 重启续聊:内存未命中但显式携带 session_id(进程重启/LRU 淘汰后重入)
+    → resolve_thread 做属主与 active 校验;通过则以原 thread_id 重建运行时 agent,
+    上下文从共享 PG checkpointer 续读,is_new=False(身份早已注入,幂等兜底仍在);
+    跨属主/已终结/不存在统一 404,档案校验故障 503 fail-closed——绝不静默换新会话。
     """
+    now = time.monotonic()
     async with _sessions_lock:
         if session_id and session_id in _sessions:
             existing = _sessions[session_id]
@@ -127,9 +153,33 @@ async def _get_or_create_session(
                 )
                 existing.user_token = user_token
                 existing.identity = identity
+            _sessions.move_to_end(session_id)
+            _sessions_last_access[session_id] = now
             return existing, False
 
         user_id = identity.get("user_id")
+
+        # #169:重启/淘汰后的恢复路径——显式 session_id 必先过档案属主校验
+        if session_id:
+            if user_id is None:
+                raise HTTPException(status_code=404, detail=_SESSION_RESUME_REJECT)
+            try:
+                rec = await asyncio.to_thread(resolve_thread, session_id, int(user_id))
+            except Exception as exc:  # noqa: BLE001 — 校验故障不得静默换新会话
+                raise HTTPException(status_code=503, detail="会话恢复校验失败,请稍后重试") from exc
+            if rec is None:
+                raise HTTPException(status_code=404, detail=_SESSION_RESUME_REJECT)
+            checkpointer = getattr(request.app.state, "checkpointer", None)
+            agent = build_assistant_agent(
+                identity, user_token=user_token, checkpointer=checkpointer
+            )
+            session = _SessionState(session_id, identity, user_token, agent)
+            session.applied_config_fingerprint = _config_fingerprint()
+            _sessions[session_id] = session
+            _sessions_last_access[session_id] = now
+            _evict_sessions_locked(now)
+            return session, False
+
         # thread_id(SEC-07):建档优先;PG 不可用降级随机 thread_id(保隔离,不持久化)
         try:
             if user_id is not None:
@@ -146,6 +196,8 @@ async def _get_or_create_session(
         # 新建即记录当前配置指纹,避免首轮 _ensure_fresh_agent_config 误重建
         session.applied_config_fingerprint = _config_fingerprint()
         _sessions[session_id] = session
+        _sessions_last_access[session_id] = now
+        _evict_sessions_locked(now)
         return session, True
 
 
@@ -166,9 +218,7 @@ async def chat(
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
     if len(message) > _MAX_MESSAGE_CHARS:
-        raise HTTPException(
-            status_code=400, detail=f"消息过长(上限 {_MAX_MESSAGE_CHARS} 字)"
-        )
+        raise HTTPException(status_code=400, detail=f"消息过长(上限 {_MAX_MESSAGE_CHARS} 字)")
     session_id = (body.get("session_id") or "").strip() or None
 
     session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
@@ -243,9 +293,8 @@ def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> Non
     )
     session.applied_config_fingerprint = current
 
-async def _compress_if_needed(
-    session: _SessionState, config: dict, user_query: str
-) -> str | None:
+
+async def _compress_if_needed(session: _SessionState, config: dict, user_query: str) -> str | None:
     """M6 #114:轮末检查会话 token,超阈值则压缩回写 checkpoint。
 
     回写 = update_state 产生 checkpoint **新版本**(先 REMOVE_ALL_MESSAGES
@@ -274,14 +323,10 @@ async def _compress_if_needed(
         settings = get_effective_settings()
         # 摘要用 strong 模型(ADR-0004「压缩即理解」,降 light 须 eval 证明);
         # 温度 0 + 输出预算 = reasoning-safe
-        summarizer = build_model(settings).bind(
-            temperature=0, max_tokens=SUMMARY_MAX_TOKENS
-        )
+        summarizer = build_model(settings).bind(temperature=0, max_tokens=SUMMARY_MAX_TOKENS)
         result = await maybe_compress(
             messages,
-            summarize_fn=lambda older, query: summarize_messages(
-                older, query, summarizer
-            ),
+            summarize_fn=lambda older, query: summarize_messages(older, query, summarizer),
             threshold=settings.context_compress_threshold_tokens,
             recent_keep=settings.context_recent_keep_messages,
             query=user_query,
@@ -315,9 +360,9 @@ async def _stream_turn(
     落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
     checkpointer:配置变更后重建 agent 需要(见 _ensure_fresh_agent_config)。
     """
+
     def sse(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
 
     # review P0-1:同会话并发轮次串行化——锁被占用时立即回 busy,
     # 不排队(前端提示「上一条还在回复中」);check/acquire 间无 await,原子。
@@ -508,6 +553,7 @@ def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
 
     return _impl(system_prompt, tool_names)
 
+
 # ── M6 #111 管理 API:配置热生效 ────────────────────────────────────────
 
 # 高敏键(Settings 字段名):真实凭证,只读回显掩码,永不入库/不可在线改。
@@ -612,6 +658,7 @@ async def put_admin_config(
     invalidate_settings_cache()
     return {"updated": list(body.keys())}
 
+
 def get_all_config() -> dict[str, str]:
     """读 agent_config 全部键值(lazy;模块级包装供测试 patch)。"""
     from official_agent.state.config_store import get_all_config as _impl
@@ -634,6 +681,7 @@ def invalidate_settings_cache() -> None:
 
 
 # ── M6 #112 管理 API:运营视图(对话列表/详情) ───────────────────────────
+
 
 def list_conversations(**kwargs: Any) -> list[dict[str, Any]]:
     """运营列表(lazy;模块级包装供测试 patch)。"""
@@ -682,6 +730,7 @@ async def get_admin_conversation_detail(
 
 
 # ── 会话管理(M6 #115 G1-G3):用户历史会话/回看,管理员按用户查看 ────────────
+
 
 def _project_messages(raw_messages: list) -> list[dict[str, str]]:
     """checkpointer 消息 → [{role, content}]:只保留 user/assistant 文本。
@@ -746,9 +795,7 @@ async def list_my_sessions(
             "channel": t.channel,
             "subject": t.subject,
             "created_at": t.created_at,
-            **overview.get(
-                t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}
-            ),
+            **overview.get(t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}),
         }
         for t in threads
     ]
@@ -801,9 +848,7 @@ async def get_admin_sessions(
             "channel": t.channel,
             "subject": t.subject,
             "created_at": t.created_at,
-            **overview.get(
-                t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}
-            ),
+            **overview.get(t.thread_id, {"rounds": 0, "last_at": None, "preview": ""}),
         }
         for t in threads
     ]

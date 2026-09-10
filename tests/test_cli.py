@@ -81,9 +81,7 @@ def _login_ok(user_id: int = 7, role: str = "管理员") -> httpx.Response:
 
     claims = {"userId": user_id, "roleNames": [role], "permissionCodes": ["user:view"]}
     token = f"{b64(b'{}')}.{b64(json.dumps(claims).encode())}.sig"
-    return httpx.Response(
-        200, json={"code": 200, "message": "ok", "data": {"token": token}}
-    )
+    return httpx.Response(200, json={"code": 200, "message": "ok", "data": {"token": token}})
 
 
 def _install_mock_backend() -> None:
@@ -310,12 +308,28 @@ def test_run_turn_accumulates_history_and_shows_tool_flow(monkeypatch: pytest.Mo
             assert stream_mode == ["messages", "updates"]
             yield "messages", (AIMessageChunk(content="查询中"), {})
             # 三节点各吐增量(model→tools→model),对齐真实图契约
-            yield "updates", {"agent": {"messages": [
-                AIMessage("", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "c1"}]),
-            ]}}
-            yield "updates", {"tools": {"messages": [
-                ToolMessage("{'cycleId': 2}", tool_call_id="c1", name="get_open_cycle"),
-            ]}}
+            yield (
+                "updates",
+                {
+                    "agent": {
+                        "messages": [
+                            AIMessage(
+                                "", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "c1"}]
+                            ),
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage("{'cycleId': 2}", tool_call_id="c1", name="get_open_cycle"),
+                        ]
+                    }
+                },
+            )
             yield "updates", {"agent": {"messages": [AIMessage("当前 1 个开放周期。")]}}
 
     async def go() -> list:

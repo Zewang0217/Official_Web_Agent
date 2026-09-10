@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from official_agent.state import config_store, conversation
     from official_agent.state.pg import get_checkpointer
     from official_agent.state.threads import ensure_agent_threads_table
+
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
         try:
@@ -72,4 +73,5 @@ def create_app() -> FastAPI:
         """探活(不鉴权)。checkpointer 就绪(PG 连通)才算健康。"""
         ready = getattr(app.state, "checkpointer", None) is not None
         return {"status": "ok" if ready else "degraded"}
+
     return app

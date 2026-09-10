@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 
+    # 会话注册表(#169):进程内有界;淘汰只删运行时对象,PG 档案/checkpoint 不动
+    session_registry_max: int = 500
+    session_registry_ttl_seconds: int = 3600
+
     # FastAPI 服务(INF-04):官网候选人客服通道
     agent_host: str = "127.0.0.1"
     agent_port: int = 8001

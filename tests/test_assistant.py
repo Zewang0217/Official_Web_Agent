@@ -176,9 +176,7 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
     # _ALL_TOOLS 在 import 时捕获原函数引用,patch 装配表本身
     patched_tools = dict(assistant_mod._ALL_TOOLS, get_open_cycle=fake_get_open_cycle)
     monkeypatch.setattr(assistant_mod, "_ALL_TOOLS", patched_tools, raising=True)
-    monkeypatch.setattr(
-        assistant_mod, "ChatAnthropic", lambda **kwargs: fake_model, raising=True
-    )
+    monkeypatch.setattr(assistant_mod, "ChatAnthropic", lambda **kwargs: fake_model, raising=True)
     agent = build_assistant_agent(identity_of("admin"))
     result = await agent.ainvoke({"messages": [HumanMessage("现在有开放周期吗?")]})
     msgs = result["messages"]
@@ -229,9 +227,7 @@ async def test_react_loop_read_tool_runs_as_asker_under_scope(
     try:
         seq = iter(
             [
-                AIMessage(
-                    "", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "call_1"}]
-                ),
+                AIMessage("", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "call_1"}]),
                 AIMessage("当前有 1 个开放周期:2025 秋招(cycleId=2)。"),
             ]
         )
@@ -302,8 +298,10 @@ def test_build_model_openai_compatible_missing_config_fails() -> None:
     from official_agent.graphs.assistant import build_model
 
     settings = Settings(  # type: ignore[call-arg]
-        _env_file=None, llm_provider="openai-compatible",
-        llm_base_url="", llm_api_key="",
+        _env_file=None,
+        llm_provider="openai-compatible",
+        llm_base_url="",
+        llm_api_key="",
     )
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
         build_model(settings)

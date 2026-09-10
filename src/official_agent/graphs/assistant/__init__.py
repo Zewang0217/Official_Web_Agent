@@ -124,8 +124,8 @@ def identity_message(identity: ResolvedIdentity) -> str:
         "unknown": "用户",
     }.get(identity.get("role", "unknown"), "用户")
     name = identity.get("name")
-    greeting = f"{name}同学" if name and identity.get("role") == "candidate" else (
-        name or role_label
+    greeting = (
+        f"{name}同学" if name and identity.get("role") == "candidate" else (name or role_label)
     )
     perms = identity.get("permission_codes") or []
     perm_note = (
@@ -134,15 +134,11 @@ def identity_message(identity: ResolvedIdentity) -> str:
         else ",当前无额外数据访问权限"
     )
     return (
-        f"当前对话用户是{greeting}({role_label})。"
-        f"{perm_note}。"
-        "回答时用自然称呼,不要提及内部字段。"
+        f"当前对话用户是{greeting}({role_label})。{perm_note}。回答时用自然称呼,不要提及内部字段。"
     )
 
 
-def build_model(
-    settings: Any, model: str | None = None, stream_usage: bool = False
-) -> Any:
+def build_model(settings: Any, model: str | None = None, stream_usage: bool = False) -> Any:
     """按配置构造对话模型(GRA-08 路由的接入点)。
 
     - anthropic:ANTHROPIC_API_KEY(默认)
@@ -159,16 +155,12 @@ def build_model(
         from langchain_openai import ChatOpenAI
 
         if not settings.llm_base_url or not settings.llm_api_key:
-            raise ValueError(
-                "openai-compatible 模式需要在 .env 配置 LLM_BASE_URL 与 LLM_API_KEY"
-            )
+            raise ValueError("openai-compatible 模式需要在 .env 配置 LLM_BASE_URL 与 LLM_API_KEY")
         return ChatOpenAI(
             model=model,
             api_key=SecretStr(settings.llm_api_key),
             base_url=settings.llm_base_url,
-            model_kwargs=(
-                {"stream_options": {"include_usage": True}} if stream_usage else {}
-            ),
+            model_kwargs=({"stream_options": {"include_usage": True}} if stream_usage else {}),
         )
     # ChatAnthropic 为 pydantic **kwargs 构造器,mypy 无法静态解析字段
     return ChatAnthropic(  # type: ignore[call-arg]
