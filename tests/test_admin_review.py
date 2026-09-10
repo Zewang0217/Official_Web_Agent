@@ -92,7 +92,7 @@ def test_queue_zero_filter_queries_hard_zero(
         "/api/agent/admin/evaluation/queue?cycle_id=2026&queue=zero", headers=_AUTH
     )
     assert resp.status_code == 200
-    assert seen["params"] == (2026,)
+    assert seen["params"] == (2026, 2026)  # #154:外层 cycle + 子查询 user_id 归属
     assert "hard_zero = TRUE" in seen["sql"]
     assert resp.json()["items"][0]["hard_zero"] is True
     assert resp.json()["queue"] == "zero"
