@@ -276,3 +276,29 @@ def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
             (cycle_id, str(older_than_minutes)),
         ).fetchall()
     return [int(r["job_id"]) for r in rows]
+
+def list_review_queue(cycle_id: int, queue: str = "all") -> list[dict[str, Any]]:
+    """评审队列投影(#128):每简历最新卡 + 关联 user_id(勾选重评需要,#154)。
+
+    queue=zero → 仅初筛不过(hard_zero)子队列;all → 全部。
+    """
+    with _conn() as conn:
+        ensure_evaluation_tables(conn)
+        outer = "WHERE hard_zero = TRUE" if queue == "zero" else ""
+        rows = conn.execute(
+            f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (resume_id)
+                    s.resume_id, s.card_version, s.status, s.hard_zero, s.total,
+                    s.prompt_version, s.created_at,
+                    (SELECT j.user_id FROM evaluation_job j
+                      WHERE j.resume_id = s.resume_id AND j.cycle_id = %s
+                      ORDER BY j.job_id DESC LIMIT 1) AS user_id
+                FROM evaluation_scorecard s WHERE s.cycle_id = %s
+                ORDER BY resume_id, card_version DESC
+            ) latest {outer}
+            ORDER BY resume_id
+            """,
+            (cycle_id, cycle_id),
+        ).fetchall()
+        return [dict(r) for r in rows]

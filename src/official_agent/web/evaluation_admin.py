@@ -209,32 +209,8 @@ async def evaluation_queue(
     if queue not in ("zero", "all"):
         raise HTTPException(status_code=400, detail="queue 只支持 zero/all")
 
-    def _query() -> list[dict[str, Any]]:
-        with evaluation._conn() as conn:
-            evaluation.ensure_evaluation_tables(conn)
-            # 先取每简历最新卡,再按 hard_zero 过滤(B4 评审 P2:复评翻盘后
-            # 不应以过期旧卡滞留 0 分队列)
-            outer = "WHERE hard_zero = TRUE" if queue == "zero" else ""
-            rows = conn.execute(
-                f"""
-                SELECT * FROM (
-                    SELECT DISTINCT ON (resume_id)
-                        s.resume_id, s.card_version, s.status, s.hard_zero, s.total,
-                        s.prompt_version, s.created_at,
-                        (SELECT j.user_id FROM evaluation_job j
-                          WHERE j.resume_id = s.resume_id AND j.cycle_id = %s
-                          ORDER BY j.job_id DESC LIMIT 1) AS user_id
-                    FROM evaluation_scorecard s WHERE s.cycle_id = %s
-                    ORDER BY resume_id, card_version DESC
-                ) latest {outer}
-                ORDER BY resume_id
-                """,
-                (cycle_id, cycle_id),
-            ).fetchall()
-            return [dict(r) for r in rows]
-
     try:
-        items = await asyncio.to_thread(_query)
+        items = await asyncio.to_thread(evaluation.list_review_queue, cycle_id, queue)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询队列失败,请稍后重试") from exc
     return {"items": items, "total": len(items), "queue": queue}
