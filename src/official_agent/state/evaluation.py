@@ -225,27 +225,20 @@ def create_jobs(items: list[tuple[int, int]], cycle_id: int) -> list[int]:
     """每份简历一行 job;幂等(闸门2):同 (resume, cycle) 已有活跃 job → 返回已有 job_id。
 
     终态(succeeded/failed)不拦——复评是合法操作(新版本卡);活跃才去重。
-    SELECT-first:先查活跃 job,有则直接复用;无则 INSERT。
-    INSERT 用 savepoint 包裹,撞唯一键(uq_eval_job_active_resume,
-    并发下另一请求已插入)时回滚 savepoint 读回已有 job,事务不因
-    UniqueViolation 进入 aborted 状态。
+    SELECT-first:先查活跃 job,有则直接复用;无则 INSERT。INSERT 包在
+    savepoint 里,并发撞唯一键(uq_eval_job_active_resume)时回滚 savepoint
+    并读回已有 job,不让事务进入 aborted 状态。
     """
     ids: list[int] = []
     with _conn() as conn:
         ensure_evaluation_job_table(conn)
         for resume_id, user_id in items:
-            existing = conn.execute(
-                "SELECT job_id FROM evaluation_job "
-                "WHERE resume_id = %s AND cycle_id = %s "
-                "AND status IN ('pending', 'running') "
-                "ORDER BY job_id DESC LIMIT 1",
-                (resume_id, cycle_id),
-            ).fetchone()
-            if existing:
-                ids.append(int(existing["job_id"]))
+            existing = _find_active_job(conn, resume_id, cycle_id)
+            if existing is not None:
+                ids.append(existing)
                 continue
             try:
-                with conn.transaction(savepoint=True):
+                with conn.transaction():
                     row = conn.execute(
                         """
                         INSERT INTO evaluation_job (resume_id, user_id, cycle_id)
@@ -253,25 +246,32 @@ def create_jobs(items: list[tuple[int, int]], cycle_id: int) -> list[int]:
                         """,
                         (resume_id, user_id, cycle_id),
                     ).fetchone()
-                    if row:
-                        ids.append(int(row["job_id"]))
-                        continue
+                if row:
+                    ids.append(int(row["job_id"]))
+                    continue
             except psycopg.errors.UniqueViolation:
                 pass  # 并发撞唯一键 → 读回已有活跃 job
-            existing = conn.execute(
-                "SELECT job_id FROM evaluation_job "
-                "WHERE resume_id = %s AND cycle_id = %s "
-                "AND status IN ('pending', 'running') "
-                "ORDER BY job_id DESC LIMIT 1",
-                (resume_id, cycle_id),
-            ).fetchone()
-            if existing:
-                ids.append(int(existing["job_id"]))
-            else:
+            existing = _find_active_job(conn, resume_id, cycle_id)
+            if existing is None:
                 raise RuntimeError(
                     f"创建 job 失败且无活跃 job 可复用(resume={resume_id}, cycle={cycle_id})"
                 )
+            ids.append(existing)
     return ids
+
+
+def _find_active_job(
+    conn: psycopg.Connection[dict[str, Any]], resume_id: int, cycle_id: int
+) -> int | None:
+    """该 (resume, cycle) 最新一条活跃 job_id;无则 None。"""
+    row = conn.execute(
+        "SELECT job_id FROM evaluation_job "
+        "WHERE resume_id = %s AND cycle_id = %s "
+        "AND status IN ('pending', 'running') "
+        "ORDER BY job_id DESC LIMIT 1",
+        (resume_id, cycle_id),
+    ).fetchone()
+    return int(row["job_id"]) if row else None
 
 
 def mark_job(
