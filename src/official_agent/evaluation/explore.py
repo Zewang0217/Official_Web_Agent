@@ -206,8 +206,19 @@ async def explore_repo(
             if not tool_calls:
                 break  # 材料自认充分,正常终止
             written_slots: list[str] = []
-            turn += len(tool_calls)  # D7:轮数 = LLM 调用 + 工具调用累计
             for tc in tool_calls:
+                # D7 硬闸:轮数 = LLM+工具调用累计,逐次判定(评审 P1:一批并行
+                # 工具调用不得突破 80 上限);墙钟同样覆盖工具执行
+                if turn >= MAX_TURNS:
+                    dossier.degraded = True
+                    dossier.degrade_reason = dossier.degrade_reason or f"轮数 {MAX_TURNS} 触顶"
+                    break
+                remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
+                if remaining <= 0:
+                    dossier.degraded = True
+                    dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
+                    break
+                turn += 1
                 tool_name = tc.get("name") or ""
                 tool = tools_by_name.get(tool_name)
                 payload = None  # 预绑定:首调用即炸时 isinstance 判定不炸
@@ -215,8 +226,15 @@ async def explore_repo(
                     observation = f"未知工具 {tool_name}"
                 else:
                     try:
-                        payload = await tool.coroutine(**(tc.get("args") or {}))
+                        payload = await asyncio.wait_for(
+                            tool.coroutine(**(tc.get("args") or {})),
+                            timeout=max(remaining, 1.0),
+                        )
                         observation = _observation_text(tool_name, payload)
+                    except TimeoutError:
+                        dossier.degraded = True
+                        dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
+                        break
                     except GitHubUnavailable as exc:
                         observation = f"工具不可用(降级信号): {exc}"
                     except Exception as exc:  # noqa: BLE001 — 单工具炸不炸整轮
@@ -283,7 +301,7 @@ def _explore_system_text() -> str:
     """探索技能文本(ADR-0004 唯一权威是文件;investigate v3=探索段,D14)。"""
     from official_agent.prompt_loader import load_prompt
 
-    return load_prompt("evaluation_investigate.md")
+    return load_prompt("evaluation/explore.md")
 
 
 async def run_explore(
