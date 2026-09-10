@@ -86,6 +86,8 @@ services:
       SPRING_RABBITMQ_HOST: rabbitmq
       SPRING_RABBITMQ_USERNAME: official
       SPRING_RABBITMQ_PASSWORD: official
+      # #125 协同评价表:与 official-collab 共享服务令牌(JWT 同下行既有密钥)
+      COLLAB_SERVICE_TOKEN: local-collab-token
       # M6 #115:管理代理指向 agent。缺省 host-gateway:支持 agent 以宿主机
       # 进程(uv run uvicorn,night-run E2E 形态)运行;整栈容器化时用
       # AGENT_BASE_URL=http://agent:8001/api/agent docker compose up 覆盖回内网名。
@@ -122,6 +124,29 @@ services:
       - ./logs:/app/logs        # RotatingFileHandler 落盘(#116 AC)
     depends_on:
       agent-pg:
+        condition: service_healthy
+
+  # ── 协同评价服务(#125 面试评价工作台;Hocuspocus,3100)──
+  collab:
+    image: official-collab-server:latest
+    environment:
+      COLLAB_PORT: "3100"
+      JWT_SECRET: local-dev-secret-0123456789abcdef0123456789abcdef
+      COLLAB_SERVICE_TOKEN: local-collab-token
+      BACKEND_BASE_URL: http://backend:8080
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: official
+      DB_POOL_SIZE: "5"
+      STORE_DEBOUNCE_MS: "2000"
+    ports:
+      - "127.0.0.1:3100:3100"
+    depends_on:
+      backend:
+        condition: service_started
+      mysql:
         condition: service_healthy
 
   # ── 管理面板(admin 模式,3000)与官网客户端(user 模式,3001)──
