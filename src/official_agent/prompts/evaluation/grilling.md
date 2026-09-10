@@ -2,6 +2,8 @@
 name: evaluation-grilling
 description: B 采访前调查·出题段(单次结构化调用:dossier 材料 → 题组 v2,十类+追问链;strict 结构化输出)
 version: evaluation_grilling/v2
+model_tier: strong
+cache_prefix: evaluation-grilling-v2
 model: strong
 ---
 

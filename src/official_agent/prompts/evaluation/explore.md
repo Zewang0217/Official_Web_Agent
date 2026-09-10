@@ -2,6 +2,8 @@
 name: evaluation-investigate
 description: B 采访前调查·探索段(受限 ReAct 循环,D6 八工具收集十类取材材料,产出 dossier;不出题)
 version: evaluation_investigate/v3
+model_tier: strong
+cache_prefix: evaluation-explore-v3
 model: strong
 ---
 

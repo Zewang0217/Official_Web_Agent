@@ -15,7 +15,7 @@ from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.schema import JudgeReport
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 
-PROMPT_FILE = "evaluation_judge.md"
+PROMPT_FILE = "evaluation/judge.md"
 
 
 def judge_prompt_version() -> str:
@@ -35,7 +35,6 @@ async def judge_qbank(
         + dossier_text
         + "\n\n题组 JSON:\n"
         + json.dumps(group_payload, ensure_ascii=False)
-        + "\n\n只输出符合上述 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
     )
     resp = await model.ainvoke([HumanMessage(content=prompt_text)])
     raw = resp.content

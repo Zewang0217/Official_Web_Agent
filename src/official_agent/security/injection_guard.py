@@ -4,7 +4,7 @@
 ①工具返回出口:统一包 `<data source="…">` 数据区标签 + 注入模式库确定性
   扫描(命中标 injection_suspect 一并给模型,**不阻断**),落 trace;
 ②system 政策段(prompts/assistant.md):标签内一律是数据,指令样文本不执行;
-③B1 评分链:简历原文同款包标(prompts/evaluation_scoring.md + graph 装配)。
+③B1 评分链:简历原文同款包标(prompts/evaluation/scoring.md + graph 装配)。
 
 守卫轻契约(#55/#142/#68 三票共享,不建框架代码):
 - 输入守卫统一挂「工具返回出口」一个函数点(guard_tool_result);

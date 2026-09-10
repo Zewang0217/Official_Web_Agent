@@ -27,7 +27,7 @@ from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 from official_agent.security.injection_guard import wrap_data_zone
 
-PROMPT_FILE = "evaluation_scoring.md"
+PROMPT_FILE = "evaluation/scoring.md"
 CARD_SCHEMA_VERSION = "evaluation_scorecard/v1"
 SCORING_TEMPERATURE = 0.1
 
@@ -157,8 +157,7 @@ async def llm_score(state: EvaluationState) -> dict:
             load_prompt(PROMPT_FILE)
             + "\n\n---\n\n简历各维原文:\n\n"
             + "\n\n".join(blocks)
-            + "\n\n只输出符合上述 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
-            + "\nfield_key 取值必须是:"
+            + "\n\nfield_key 取值必须是:"
             + ",".join(f["field_key"] for f in state["fields"])
         )
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])

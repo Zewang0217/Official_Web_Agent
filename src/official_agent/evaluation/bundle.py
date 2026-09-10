@@ -25,7 +25,7 @@ from official_agent.evaluation.schema import QuestionSet
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 
-PROMPT_FILE = "evaluation_b4.md"
+PROMPT_FILE = "evaluation/b4.md"
 
 
 def _prompt_version() -> str:

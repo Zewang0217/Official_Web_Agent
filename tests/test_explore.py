@@ -450,3 +450,53 @@ def tmp_path_fixtures(data: dict, tmp_name: str = "qbank_probes.yaml") -> Path:
     p = d / tmp_name
     p.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
     return p
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_batch_cannot_exceed_turn_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """评审 P1 回归:一次响应带多个工具调用,累计不得突破 80 上限。"""
+    monkeypatch.setattr(explore_mod, "MAX_TURNS", 4)
+    batch = [("repo_meta", {})] * 6  # 单批 6 个并行调用
+    model = _FakeModel([_ai_with_tools(batch)])  # 只有一轮,全部调用都在这一批
+    dossier = await explore_repo(
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+    )
+    assert dossier.degraded
+    assert "轮数 4 触顶" in dossier.degrade_reason
+    assert dossier.turns_used == 4  # 1 LLM + 3 工具(第 4 个后到闸)
+
+
+@pytest.mark.asyncio
+async def test_tool_wall_clock_timeout_degrades(monkeypatch: pytest.MonkeyPatch) -> None:
+    """工具执行超剩余墙钟 → 停机降级(不再依赖下一轮顶部判定)。"""
+    monkeypatch.setattr(explore_mod, "MAX_WALL_SECONDS", 0)
+
+    class _SlowModel:
+        def bind_tools(self, tools: Any, **kwargs: Any):
+            return self
+
+        async def ainvoke(self, messages: list):
+            return AIMessage(
+                "",
+                tool_calls=[{"name": "repo_meta", "args": {}, "id": "c1"}],
+            )
+
+    dossier = await explore_repo(
+        project_text="t",
+        owner="o",
+        name="r",
+        attribution="",
+        login="",
+        client=_FakeClient(),  # type: ignore[arg-type]
+        model=_SlowModel(),  # type: ignore[arg-type]
+    )
+    assert dossier.degraded
+    assert "墙钟" in dossier.degrade_reason

@@ -2,6 +2,8 @@
 name: evaluation-scoring
 description: B 简历初筛打分 prompt v3(逐维三要素 rationale+提分点+每维 rubric 槽+态度三要素;strict 结构化输出)
 version: evaluation_scoring/v3
+model_tier: strong
+cache_prefix: evaluation-scoring-v3
 model: strong
 ---
 

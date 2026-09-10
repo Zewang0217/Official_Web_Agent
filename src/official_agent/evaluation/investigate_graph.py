@@ -35,7 +35,7 @@ from official_agent.evaluation.schema import (
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 
-PROMPT_FILE = "evaluation_grilling.md"
+PROMPT_FILE = "evaluation/grilling.md"
 SCORING_TEMPERATURE = 0.2
 
 
@@ -236,15 +236,9 @@ async def generate_node(state: InvestigationState) -> dict:
         thin = len(dossier_text.strip()) < 400  # 敷衍 dossier(D10:1-2 题合法)
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
-        instruction = (
-            f"材料体量={'贫乏' if thin else '充足'}。"
-            + (
-                "贫乏材料:只出入口题(+至多 2 备选),chains 留空数组,总题数 ≤3。"
-                if thin
-                else "chains 出 2-4 条(每链 3-5 层),备选 2-3,总题数 ≤15。"
-            )
-            + "\n只输出符合上述 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
-        )
+        # ADR-0004:代码零 prompt 字符串——体量标记是数据,规则文本全在
+        # prompts/evaluation/grilling.md(敷衍/充足两套规则文件内已有)
+        material_note = f"材料体量={'贫乏' if thin else '充足'}。"
         prompt_text = (
             load_prompt(PROMPT_FILE)
             + "\n\n---\n\n候选人自述:\n"
@@ -252,7 +246,7 @@ async def generate_node(state: InvestigationState) -> dict:
             + "\n\ndossier 材料:\n"
             + dossier_text
             + "\n\n"
-            + instruction
+            + material_note
         )
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])
         # 出题段单次 usage(#154/D9):raw token_usage 优先(DeepSeek cache 字段)
