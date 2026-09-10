@@ -366,7 +366,6 @@ def test_recursion_limit_forwarded_in_config(
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: agent)
     # 用立即成功的 agent 而非挂起者:换 _FakeAgent 风格
     from langchain_core.messages import AIMessage
-    from langchain_core.runnables import RunnableConfig
 
     class _OkAgent:
         async def astream(self, *args, config: RunnableConfig, **kwargs):
