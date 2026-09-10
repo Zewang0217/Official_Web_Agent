@@ -128,7 +128,7 @@ services:
 
   # ── 协同评价服务(#125 面试评价工作台;Hocuspocus,3100)──
   collab:
-    image: official-collab-server:latest
+    image: official-collab:local
     environment:
       COLLAB_PORT: "3100"
       JWT_SECRET: local-dev-secret-0123456789abcdef0123456789abcdef
