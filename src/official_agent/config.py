@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     session_registry_max: int = 500
     session_registry_ttl_seconds: int = 3600
 
+    # 单轮执行预算(#170):墙钟超时与 LangGraph 递归上限;用户级配额归 #56
+    turn_wall_clock_timeout: int = 120  # 秒;票面建议 60–120
+    turn_recursion_limit: int = 25
+    # 全局活跃模型调用并发闸(#170):跨用户资源保护;数值待 #56 配额口径一起拍板
+    model_call_global_concurrency: int = 4
+    model_gate_acquire_timeout: int = 15  # 秒;闸满等待上限,超过回 busy
+
     # FastAPI 服务(INF-04):官网候选人客服通道
     agent_host: str = "127.0.0.1"
     agent_port: int = 8001

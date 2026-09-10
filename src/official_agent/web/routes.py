@@ -35,7 +35,7 @@ from official_agent.graphs.assistant.compression import (
 from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
-from official_agent.tools.client import BackendError
+from official_agent.tools.client import BackendError, BackendUnavailableError
 from official_agent.tools.readonly import asker_scope
 
 router = APIRouter()
@@ -116,7 +116,10 @@ async def _authenticate(request: Request, authorization: Annotated[str | None, H
 
     try:
         identity = await resolve({"kind": "web", "token": token})  # type: ignore[typeddict-item]
-    except Exception as exc:  # BackendError/httpx:凭证错/后端不可达
+    except BackendUnavailableError as exc:
+        # #170:后端网络/服务故障是 503(可重试),不再与凭证错误混为 401
+        raise HTTPException(status_code=503, detail="认证服务暂时不可用,请稍后重试") from exc
+    except BackendError as exc:  # 凭证无效/过期等
         raise HTTPException(status_code=401, detail="身份解析失败") from exc
     return identity, token
 
@@ -240,26 +243,66 @@ _ERR_UNKNOWN = "unknown"
 _ERR_DISCONNECTED = "client_disconnected"
 # 同会话并发轮次占用(review P0-1):第二个并发请求立即拒绝,不入队
 _ERR_BUSY = "busy"
+# #170:单轮墙钟超时中止
+_ERR_TIMEOUT = "timeout"
+
+# #170:面向客户端的稳定错误文案(不含原始异常/内部细节),附 trace_id 供排障。
+# 完整异常只进服务端日志(logger.warning exc_info)。
+_ERR_SAFE_COPY: dict[str, str] = {
+    _ERR_BUSY: "上一条消息还在回复中,请稍候",
+    _ERR_AUTH_EXPIRED: "登录状态已过期,请重新登录后再试",
+    _ERR_BACKEND_UNAVAILABLE: "服务暂时不可用,请稍后重试",
+    _ERR_MODEL: "模型服务出现异常,请稍后重试",
+    _ERR_INVALID_REQUEST: "这条消息无法处理,请调整后重试",
+    _ERR_TIMEOUT: "本轮响应超时已中止,请稍后重试",
+    _ERR_UNKNOWN: "服务出现异常,请稍后重试",
+}
+
 # auth 失效的关键词(get_as_user 失败文案含之;message 判定的最后兜底)。
 _AUTH_FAIL_HINTS = ("令牌", "token", "登录", "JWT")
 # 单条消息长度上限(review P0-2:限流参数归 #56,先收敛单请求滥用面;
 # 超限走 400 invalid_request,前端零改动)
 _MAX_MESSAGE_CHARS = 2000
 
+# #170:全局活跃模型调用并发闸(跨用户资源保护;进程内,数值待 #56 拍板)
+_model_gate: asyncio.Semaphore | None = None
+
+
+def _get_model_gate() -> asyncio.Semaphore:
+    global _model_gate
+    if _model_gate is None:
+        from official_agent.config import get_effective_settings
+
+        _model_gate = asyncio.Semaphore(
+            max(int(get_effective_settings().model_call_global_concurrency), 1)
+        )
+    return _model_gate
+
+
+def _sse_error(code: str) -> dict[str, str]:
+    """稳定错误事件:安全文案 + trace_id,绝不带原始异常串(#170)。"""
+    from official_agent.observability import current_trace_id
+
+    copy = _ERR_SAFE_COPY.get(code) or _ERR_SAFE_COPY[_ERR_UNKNOWN]
+    return {"type": "error", "code": code, "message": f"{copy}(trace:{current_trace_id()})"}
+
 
 def _error_code(exc: Exception) -> str:
     """执行期异常 → 契约错误码。分类原则:
     - 用户令牌失效(get_as_user 文案)或明确登录/token 问题 → auth_expired(#94 核心)
+    - BackendUnavailableError(网络/传输故障,#170 分型)→ backend_unavailable
     - httpx 传输/超时 → backend_unavailable(后端不可达/网关错)
     - 其余 BackendError(业务错误)按其文案;未知 → unknown
     观测/模型错误由 LangGraph 包装,不易精确识别,归 unknown(前端可重试)。
     """
     import httpx
 
+    from official_agent.tools.client import BackendUnavailableError
+
     text = str(exc)
     if any(h in text for h in _AUTH_FAIL_HINTS):
         return _ERR_AUTH_EXPIRED
-    if isinstance(exc, httpx.HTTPError):
+    if isinstance(exc, (httpx.HTTPError, BackendUnavailableError)):
         return _ERR_BACKEND_UNAVAILABLE
     if isinstance(exc, BackendError):
         # 业务错误(如「未投递」)不是系统故障——按 invalid_request 让前端展示 message
@@ -376,7 +419,7 @@ async def _stream_turn(
         # M6 #114:轮计数(1 起),压缩事件「触发轮」留痕用
         session.turns += 1
 
-        config = {
+        config: dict[str, Any] = {
             "configurable": {"thread_id": session.session_id},
             "callbacks": langfuse_callbacks(),
         }
@@ -406,56 +449,101 @@ async def _stream_turn(
         # 账号不再代读在线数据。ContextVar 是任务/协程链本地,经 agent 工具链
         # 传播(端到端测试 test_react_loop_read_tool_runs_as_asker_under_scope)。
         async with asker_scope(session.user_token):
+            # #170:全局活跃模型调用闸(跨用户资源保护)+ 单轮墙钟超时——
+            # 卡死的模型/工具调用在配置时限内被取消,turn_lock 随 with 释放。
+            from official_agent.config import get_effective_settings
+
+            _settings = get_effective_settings()
+            config["recursion_limit"] = max(int(_settings.turn_recursion_limit), 1)
+            gate = _get_model_gate()
             try:
-                async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
-                    {"messages": messages}, config=config, stream_mode=["messages", "updates"]
-                ):
-                    if mode == "messages":
-                        chunk, _meta = payload
-                        if isinstance(chunk, AIMessageChunk) and chunk.content:
-                            # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
-                            text = chunk.content if isinstance(chunk.content, str) else ""
-                            if text:
-                                reply_chunks.append(text)
-                                yield sse({"type": "delta", "role": "assistant", "content": text})
-                        # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
-                        # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
-                        # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
-                        # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
-                        um = getattr(chunk, "usage_metadata", None)
-                        raw_usage = (chunk.response_metadata or {}).get("token_usage")
-                        usage_payload = raw_usage if raw_usage else um
-                        if um is not None and usage_payload:
-                            extracted = extract_usage(usage_payload)
-                            if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
-                                _last_usage = extracted
-                                for k in usage_acc:
-                                    v = extracted.get(k)
-                                    cur = usage_acc.get(k) or 0
-                                    if v is not None:
-                                        usage_acc[k] = cur + v
-                    elif mode == "updates":
-                        for _ns, node_update in payload.items():
-                            if isinstance(node_update, dict):
-                                for m in node_update.get("messages") or []:
-                                    # 工具调用状态(契约 #90:tool 事件,role=tool)
-                                    if getattr(m, "tool_calls", None):
-                                        for tc in m.tool_calls:
-                                            tools_called.append(tc.get("name") or "")
-                                            yield sse(
-                                                {
-                                                    "type": "tool",
-                                                    "role": "tool",
-                                                    "name": tc.get("name"),
-                                                }
-                                            )
-            except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
-                error_code = _error_code(exc)
-                yield sse({"type": "error", "code": error_code, "message": str(exc)})
+                gate_acquired = False
+                try:
+                    await asyncio.wait_for(
+                        gate.acquire(),
+                        timeout=max(int(_settings.model_gate_acquire_timeout), 1),
+                    )
+                    gate_acquired = True
+                except TimeoutError:
+                    error_code = _ERR_BUSY
+                    logger.warning(
+                        "chat turn gate busy session=%s turns=%d concurrency=%d",
+                        session.session_id,
+                        session.turns,
+                        _settings.model_call_global_concurrency,
+                    )
+                    yield sse(_sse_error(_ERR_BUSY))
+                    return
+                async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
+                    async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
+                        {"messages": messages}, config=config, stream_mode=["messages", "updates"]
+                    ):
+                        if mode == "messages":
+                            chunk, _meta = payload
+                            if isinstance(chunk, AIMessageChunk) and chunk.content:
+                                # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
+                                text = chunk.content if isinstance(chunk.content, str) else ""
+                                if text:
+                                    reply_chunks.append(text)
+                                    yield sse(
+                                        {"type": "delta", "role": "assistant", "content": text}
+                                    )
+                            # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
+                            # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
+                            # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
+                            # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
+                            um = getattr(chunk, "usage_metadata", None)
+                            raw_usage = (chunk.response_metadata or {}).get("token_usage")
+                            usage_payload = raw_usage if raw_usage else um
+                            if um is not None and usage_payload:
+                                extracted = extract_usage(usage_payload)
+                                if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
+                                    _last_usage = extracted
+                                    for k in usage_acc:
+                                        v = extracted.get(k)
+                                        cur = usage_acc.get(k) or 0
+                                        if v is not None:
+                                            usage_acc[k] = cur + v
+                        elif mode == "updates":
+                            for _ns, node_update in payload.items():
+                                if isinstance(node_update, dict):
+                                    for m in node_update.get("messages") or []:
+                                        # 工具调用状态(契约 #90:tool 事件,role=tool)
+                                        if getattr(m, "tool_calls", None):
+                                            for tc in m.tool_calls:
+                                                tools_called.append(tc.get("name") or "")
+                                                yield sse(
+                                                    {
+                                                        "type": "tool",
+                                                        "role": "tool",
+                                                        "name": tc.get("name"),
+                                                    }
+                                                )
             except asyncio.CancelledError:
                 # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
                 # (partial reply/已调工具不丢失),error_code 记断连中止。
                 error_code = _ERR_DISCONNECTED
+            except TimeoutError:
+                # #170:墙钟超时——取消下游、锁随 with 释放、不压缩失败轮次;
+                # 客户端只收稳定文案,完整异常服务端留痕。
+                error_code = _ERR_TIMEOUT
+                logger.warning(
+                    "chat turn timeout session=%s turns=%d usage=%s",
+                    session.session_id,
+                    session.turns,
+                    usage_acc,
+                )
+            except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
+                error_code = _error_code(exc)
+                logger.warning(
+                    "chat turn failed session=%s code=%s",
+                    session.session_id,
+                    error_code,
+                    exc_info=True,
+                )
+            finally:
+                if gate_acquired:
+                    gate.release()
 
         # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
         # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
@@ -464,7 +552,10 @@ async def _stream_turn(
 
         # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
-        compress_event = await _compress_if_needed(session, config, message)
+        # #170:失败/超时/断连轮次不压缩——失败轮的残缺上下文不值得进摘要。
+        compress_event = None
+        if error_code is None:
+            compress_event = await _compress_if_needed(session, config, message)
 
         role = session.identity.get("role") or "unknown"
         tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
@@ -491,6 +582,10 @@ async def _stream_turn(
         )
         if error_code is None:
             yield sse({"type": "done", "session_id": session.session_id})
+        elif error_code != _ERR_DISCONNECTED:
+            # #170:错误事件统一走稳定文案 + trace_id(原始异常只留服务端日志);
+            # 断连无需事件(客户端已不在)。
+            yield sse(_sse_error(error_code))
     finally:
         session.turn_lock.release()
 

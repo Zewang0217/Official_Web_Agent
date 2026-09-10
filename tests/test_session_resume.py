@@ -17,6 +17,8 @@ from collections.abc import AsyncIterator
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
 
 from official_agent.state.threads import ThreadRecord
 from official_agent.web import routes
@@ -254,3 +256,195 @@ def test_resolve_thread_roundtrip_real_pg() -> None:
     finally:
         get_settings().postgres_url = original
     _ = os  # 保持导入完整
+
+
+# ── #170:单轮墙钟超时 / 安全错误契约 / 递归上限 / 全局并发闸 ──
+
+
+class _HangingAgent:
+    """astream 永不产出的假 agent:触发墙钟超时。"""
+
+    def __init__(self) -> None:
+        self.config_seen: RunnableConfig | None = None
+
+    async def astream(self, *args, config: RunnableConfig, **kwargs):
+        self.config_seen = config
+        import asyncio as _aio
+
+        await _aio.sleep(60)
+        yield "updates", {"agent": {"messages": []}}
+
+    async def aget_state(self, config: RunnableConfig):
+        return None
+
+
+class _BoomAgent:
+    """astream 立刻抛内部异常:断言原始异常不外泄。"""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def astream(self, *args, config: RunnableConfig, **kwargs):
+        raise self._exc
+        yield  # pragma: no cover
+
+    async def aget_state(self, config: RunnableConfig):
+        return None
+
+
+def _install_turn_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from official_agent.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "turn_wall_clock_timeout", 1)
+    monkeypatch.setattr(settings, "turn_recursion_limit", 25)
+    monkeypatch.setattr(settings, "model_call_global_concurrency", 4)
+    monkeypatch.setattr(settings, "model_gate_acquire_timeout", 2)
+
+
+def test_turn_timeout_returns_stable_copy_and_releases_lock(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#170:卡住的轮次在墙钟时限内中止,客户端收稳定文案,锁可靠释放。"""
+    import time as _time
+
+    agent = _HangingAgent()
+    _install(monkeypatch, thread=None)
+    _install_turn_settings(monkeypatch)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: agent)
+    t0 = _time.monotonic()
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "你好"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    elapsed = _time.monotonic() - t0
+    assert resp.status_code == 200
+    assert elapsed < 30, "超时必须在墙钟时限内生效而非挂死"
+    events = _sse_events(resp)
+    err = [e for e in events if e.get("type") == "error"]
+    assert err and err[0]["code"] == "timeout"
+    assert "超时" in err[0]["message"]
+    # 锁已释放:同会话立刻再聊不再回 busy
+    resp2 = client.post(
+        "/api/agent/chat",
+        json={"message": "还在吗", "session_id": None},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp2.status_code == 200
+    assert not [e for e in _sse_events(resp2) if e.get("code") == "busy"]
+
+
+def test_error_events_never_leak_internal_details(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#170:原始异常(内网地址/SDK 体)不得进 SSE,只给稳定文案+trace。"""
+    agent = _BoomAgent(RuntimeError("SECRET postgres://user:pw@10.0.0.9:5432/db boomed"))
+    _install(monkeypatch, thread=None)
+    _install_turn_settings(monkeypatch)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: agent)
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "你好"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 200
+    err = [e for e in _sse_events(resp) if e.get("type") == "error"]
+    assert err and err[0]["code"] == "unknown"
+    assert "SECRET" not in err[0]["message"]
+    assert "postgres://" not in err[0]["message"]
+    assert "trace:" in err[0]["message"]
+
+
+def test_recursion_limit_forwarded_in_config(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#170:recursion_limit 显式进 astream config。"""
+    agent = _HangingAgent()
+    _install(monkeypatch, thread=None)
+    _install_turn_settings(monkeypatch)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: agent)
+    # 用立即成功的 agent 而非挂起者:换 _FakeAgent 风格
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    class _OkAgent:
+        async def astream(self, *args, config: RunnableConfig, **kwargs):
+            self.config_seen = config
+            yield "messages", (AIMessage(content="好"), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config: RunnableConfig):
+            return None
+
+    ok = _OkAgent()
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: ok)
+    client.post(
+        "/api/agent/chat",
+        json={"message": "你好"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert ok.config_seen is not None
+    assert ok.config_seen.get("recursion_limit") == 25
+
+
+def test_model_gate_saturation_returns_busy(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#170:全局并发闸满 → 稳定 busy 事件,不无限排队占 SSE。"""
+
+    class _FullGate:
+        """永不放行的假闸(闸满的最坏情形)。"""
+
+        async def acquire(self) -> None:
+            import asyncio as _aio
+
+            await _aio.sleep(60)
+
+    _install(monkeypatch, thread=None)
+    _install_turn_settings(monkeypatch)
+    from official_agent.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "model_gate_acquire_timeout", 1)
+    monkeypatch.setattr(routes, "_get_model_gate", lambda: _FullGate())
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FakeGateAgent())
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "你好"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    err = [e for e in _sse_events(resp) if e.get("type") == "error"]
+    assert err and err[0]["code"] == "busy"
+
+
+class _FakeGateAgent:
+    async def astream(self, *args, config: RunnableConfig, **kwargs):
+        yield "messages", (AIMessage(content="好"), {})
+
+    async def aget_state(self, config: RunnableConfig):
+        return None
+
+
+def test_auth_backend_down_is_503_not_401(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#170:后端不可达 → 503;凭证无效仍 401——两类失败不再混淆。"""
+    from official_agent.tools.client import BackendError, BackendUnavailableError
+
+    async def _down(*_a: object, **_k: object):
+        raise BackendUnavailableError("后端连接失败(ConnectError)")
+
+    async def _bad_token(*_a: object, **_k: object):
+        raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
+
+    monkeypatch.setattr(routes, "resolve", _down)
+    resp = client.post(
+        "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 503
+
+    monkeypatch.setattr(routes, "resolve", _bad_token)
+    resp = client.post(
+        "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 401
