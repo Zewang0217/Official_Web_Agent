@@ -11,6 +11,9 @@
    (cli/web 回复出口;#159 守卫契约「回复出口」同位)
 6. checkpointer 挂起载荷:summary 先 mask_pii(require_confirmation)+
    挂起态 24h TTL 清理(state/pg.purge_expired_interrupts)
+7. 评分/出题模型入口:evaluation runner 在 _run_job 对简历字段统一
+   mask_pii_deep 后才进 run_evaluation/run_bundle(#176;命中打
+   eval_pii_exit 安全日志)
 
 ## 规则表(#164 扩展)
 

@@ -418,3 +418,79 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
     assert log["thread_id"] == "eval:1"  # 关联 job
     assert log["input_tokens"] == 150
     assert log["cache_hit_tokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
+    """#176 出口契约:姓名(结构键)与手机/邮箱/QQ/学号(自由文本)不得进评分/出题模型。"""
+    import logging as _logging
+
+    seen: dict = {}
+
+    async def _fake_status(resume_id, status):
+        return None
+
+    async def _fake_github(user_id):
+        return "someuser"
+
+    async def _fetch(user_id, cycle_id):
+        return 99, [
+            FieldText(field_key="real_name", title="姓名", value="张三"),
+            FieldText(
+                field_key="intro",
+                title="自我介绍",
+                value="电话 13812345678,邮箱 me@x.com,QQ 123456789,学号 2021023456",
+            ),
+        ]
+
+    def _values(fields):
+        # run_evaluation 收 dict 投影,run_bundle 收 FieldText
+        return [f["value"] if isinstance(f, dict) else f.value for f in fields]
+
+    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None):
+        seen["scoring"] = _values(fields)
+        return {"total": 60.0, "hard_zero": False, "dimensions": [], "attitude": {}}
+
+    async def _bundle(fields, **kw):
+        seen["qbank"] = _values(fields)
+        return {"schema_name": "evaluation_qbank/v2", "groups": [], "prompt_version": "t"}
+
+    runner = EvaluationRunner()
+    with (
+        patch.object(ev_runner, "fetch_scoring_fields", _fetch),
+        patch.object(ev_runner, "run_evaluation", _run_evaluation),
+        patch.object(ev_runner.evaluation, "save_scorecard", lambda *a, **k: 1),
+        patch.object(
+            ev_runner.evaluation,
+            "mark_job",
+            lambda jid, st, **kw: seen.setdefault("marks", []).append((st, kw)) or True,
+        ),
+        patch.object(
+            ev_runner.evaluation,
+            "get_job",
+            lambda jid: {"job_id": jid, "user_id": 42, "resume_id": 99},
+        ),
+        patch.object(ev_runner.audit, "write_audit", lambda **k: None),
+        patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
+        patch.object(ev_runner, "fetch_candidate_github", _fake_github),
+        patch.object(ev_runner, "_set_resume_status", _fake_status),
+        patch("official_agent.evaluation.bundle.run_bundle", _bundle),
+        patch("official_agent.state.qbank.save_qbank", lambda **k: 3),
+        patch("official_agent.state.conversation.write_conversation", lambda **k: None),
+        caplog.at_level(_logging.WARNING, logger="official_agent.evaluation.runner"),
+    ):
+        await runner._run_job(1, 2026, trigger_user_id=9)
+    assert seen["marks"][0] == ("running", {})
+    assert seen["marks"][1][0] == "succeeded", f"job 不应走失败路径:{seen['marks']}"
+
+    joined_scoring = " ".join(seen["scoring"])
+    joined_qbank = " ".join(seen["qbank"])
+    for leak in ("张三", "13812345678", "me@x.com", "123456789", "2021023456"):
+        assert leak not in joined_scoring, f"评分面泄漏:{leak}"
+        assert leak not in joined_qbank, f"出题面泄漏:{leak}"
+    # 键级姓名掩 + 文本规则掩码产物就位(脱敏不是清空,打分面仍有内容)
+    assert "〔姓名〕" in joined_scoring
+    assert "138****5678" in joined_scoring
+    assert "[邮箱]" in joined_scoring
+    # 安全日志断言:命中必须留痕(resume 级,不含原文)
+    assert any("eval_pii_exit" in r.getMessage() for r in caplog.records)

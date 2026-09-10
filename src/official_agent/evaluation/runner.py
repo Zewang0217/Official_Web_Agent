@@ -153,6 +153,41 @@ async def fetch_resume_authority(resume_id: int) -> dict:
     }
 
 
+def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[FieldText]:
+    """#176 出口契约:简历字段进评分/出题模型前强制深度脱敏。
+
+    打分面(FieldText docstring #123 契约)本就要求 value 已脱敏,但此前
+    无强制——评估线绕过了 chat 工具返回层的 mask_pii_deep。这里在唯一
+    入口(_run_job)统一执行:value 以 {字段键: 原文} 结构过 mask_pii_deep
+    ——键级白名单管姓名类字段(姓名不进文本正则,#164),文本正则管
+    手机/身份证/邮箱/QQ(学号等 5-11 位数字同规则)。命中打安全日志
+    (只记数量与 resume_id,不落原文)。
+    """
+    from official_agent.security.pii import mask_pii_deep
+
+    out: list[FieldText] = []
+    hits = 0
+    for f in fields:
+        masked_value = mask_pii_deep([{f.field_key: f.value}])[0][f.field_key]
+        if masked_value != f.value:
+            hits += 1
+        out.append(
+            FieldText(
+                field_key=f.field_key,
+                title=str(mask_pii_deep(f.title)),
+                value=str(masked_value),
+                placeholder=str(mask_pii_deep(f.placeholder)),
+            )
+        )
+    if hits:
+        logging.getLogger(__name__).warning(
+            "guard_event guard_name=eval_pii_exit verdict=masked fields=%d resume=%s",
+            hits,
+            resume_id,
+        )
+    return out
+
+
 class EvaluationRunner:
     """进程内单例:提交/并发控制/重试。状态真源在 evaluation_job 表。"""
 
@@ -250,6 +285,8 @@ class EvaluationRunner:
                         f"简历归属错位:job resume_id={resume_id},"
                         f"后端按 user_id={job['user_id']} 返回 {fetched_resume_id}——拒绝评分"
                     )
+                # #176 出口契约:评分与出题两个模型入口共用这份脱敏后字段
+                fields = _mask_fields_for_model(fields, resume_id=resume_id)
                 card = await run_evaluation(
                     [
                         {
