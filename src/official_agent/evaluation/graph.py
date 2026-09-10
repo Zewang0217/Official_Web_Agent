@@ -14,6 +14,7 @@ import re
 from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 
 from official_agent.config import get_effective_settings
@@ -139,7 +140,7 @@ def _evidence_in(evidence: str, source: str) -> bool:
     return bool(ev) and ev in norm(source)
 
 
-async def llm_score(state: EvaluationState, config: Any = None) -> dict:
+async def llm_score(state: EvaluationState, config: RunnableConfig | None = None) -> dict:
     """结构化打分:逐维给分+依据+原文证据,态度判定;异常进 error(B2 可重试)。"""
     try:
         settings = get_effective_settings()
