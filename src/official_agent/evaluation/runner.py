@@ -59,6 +59,20 @@ def _write_eval_usage_log(
         logging.getLogger(__name__).warning("eval 用量日志写入失败", exc_info=True)
 
 
+async def _set_resume_status(resume_id: int, status: int) -> None:
+    """简历状态位(#用户反馈):6=AI初筛中(瞬态),结束回落 2。
+
+    走管理员 PUT /api/resumes/status/{id}/{status}(resume:audit,服务账号
+    可用);失败 fail-open——状态位缺失只影响展示,不影响初筛本身。"""
+    try:
+        client = await get_backend_client()
+        await client.put(f"/api/resumes/status/{resume_id}/{status}")
+    except Exception:  # noqa: BLE001 — 状态位缺失可容忍
+        logging.getLogger(__name__).warning(
+            "简历状态位更新失败(resume=%s,status=%s)", resume_id, status, exc_info=True
+        )
+
+
 async def fetch_candidate_github(user_id: int) -> str:
     """从候选档案取 github 登录名(D17/#149):GET /api/admin/profiles/{userId}
     → detail.github(地址或裸登录名)→ 归一化为登录名。
@@ -156,6 +170,9 @@ class EvaluationRunner:
             return
         async with self._sem:
             await asyncio.to_thread(evaluation.mark_job, job_id, "running")
+            # 用户反馈:简历状态加「AI初筛中」(瞬态 6),结束后回落 2——
+            # 否则触发了初筛但状态无变化,让人困惑
+            await _set_resume_status(job["resume_id"], 6)
             card: dict | None = None
             try:
                 resume_id, fields = await fetch_scoring_fields(job["user_id"], cycle_id)
@@ -227,6 +244,7 @@ class EvaluationRunner:
                     "succeeded",
                     card_version=version,
                 )
+                await _set_resume_status(resume_id, 2)
             except Exception as exc:  # noqa: BLE001 — job 失败落表,可重试
                 await asyncio.to_thread(
                     evaluation.mark_job,
@@ -234,6 +252,7 @@ class EvaluationRunner:
                     "failed",
                     error=f"{type(exc).__name__}: {exc}"[:500],
                 )
+                await _set_resume_status(job["resume_id"], 2)
                 return
             # 完成审计在保护段外:审计失败不得把已 succeeded 的 job 翻成 failed
             try:
