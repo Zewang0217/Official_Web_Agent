@@ -16,7 +16,8 @@ from official_agent.tools.client import BackendClient
 BASE = "http://backend.test"
 LOGIN = f"{BASE}/api/auth/login"
 CYCLES = f"{BASE}/api/cycles/open"
-SPAN_ID_ZERO = "0" * 16
+# #183:W3C 禁止 parent-id 全零——span-id 每请求随机,断言只认"16-hex 且非全零"
+_SPAN_RE = __import__("re").compile(r"^[0-9a-f]{16}$")
 
 
 def make_client() -> BackendClient:
@@ -44,8 +45,10 @@ def trace_ids_of(routes: list[respx.Route]) -> list[str]:
     out = []
     for r in routes:
         tp = r.calls.last.request.headers["traceparent"]
-        assert tp.startswith("00-") and tp.endswith(f"-{SPAN_ID_ZERO}-01"), tp
-        out.append(tp.split("-")[1])
+        parts = tp.split("-")
+        assert len(parts) == 4 and parts[0] == "00" and parts[3] == "01", tp
+        assert _SPAN_RE.fullmatch(parts[2]) and parts[2] != "0" * 16, tp
+        out.append(parts[1])
     return out
 
 

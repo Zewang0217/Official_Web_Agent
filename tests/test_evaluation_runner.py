@@ -99,7 +99,7 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
     async def _fetch(user_id, cycle_id):
         return 99, _fields()
 
-    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None):
+    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         seen["resume_id"] = resume_id
         return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
 
@@ -364,7 +364,7 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
     async def _fetch(user_id, cycle_id):
         return 99, _fields()
 
-    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None):
+    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
 
     def _save(card, *, resume_id, cycle_id, prompt_version):
@@ -447,7 +447,7 @@ async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
         # run_evaluation 收 dict 投影,run_bundle 收 FieldText
         return [f["value"] if isinstance(f, dict) else f.value for f in fields]
 
-    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None):
+    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         seen["scoring"] = _values(fields)
         return {"total": 60.0, "hard_zero": False, "dimensions": [], "attitude": {}}
 
@@ -518,7 +518,7 @@ async def test_run_job_sets_correlation_trace_and_structured_logs(caplog) -> Non
     async def _fetch(user_id, cycle_id):
         return 99, _fields()
 
-    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None):
+    async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         seen["trace_during_eval"] = current_trace_id()
         return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
 
@@ -551,11 +551,8 @@ async def test_run_job_sets_correlation_trace_and_structured_logs(caplog) -> Non
     assert seen["trace_during_eval"] == expected, (
         "评分模型执行期间 trace id 应为 job 级 correlation id"
     )
-    assert (
-        current_trace_id() != expected or current_trace_id() == expected
-    )  # 复位后不强断言(测试进程共享)
     stages = [r.getMessage() for r in caplog.records if "eval_event" in r.getMessage()]
-    assert any("stage=started" in m and "attempts=2" in m for m in stages)
+    assert any("stage=started" in m and "attempts=3" in m for m in stages)  # 执行次数:2+1
     assert any("stage=scorecard_saved" in m and "prompt_version=" in m for m in stages)
     assert any("stage=succeeded" in m and "duration_ms=" in m for m in stages)
     assert all("认真的自我介绍内容" not in m for m in stages), "结构化日志不得含简历原文"

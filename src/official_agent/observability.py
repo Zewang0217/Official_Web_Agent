@@ -97,10 +97,14 @@ def current_trace_id() -> str:
 def traceparent_header() -> dict[str, str]:
     """出站请求的 W3C traceparent 头(OBS-02 契约)。
 
-    格式 `00-<trace-id>-<span-id>-01`;span-id 段固定 16 零——后端 MDC 消费
-    只取 trace-id 段(按 `-` 分段第 2 段),真实 span 关联等接入分布式追踪再补。
+    格式 `00-<trace-id>-<span-id>-01`;span-id 每次请求随机生成(W3C 禁止
+    parent-id 全零——全零会让严格解析端丢弃整个头,#183 评审),后端 MDC
+    消费只取 trace-id 段(按 `-` 分段第 2 段),真实 span 关联等接入分布式
+    追踪再补。
     """
-    return {"traceparent": f"00-{current_trace_id()}-{'0' * 16}-01"}
+    import secrets
+
+    return {"traceparent": f"00-{current_trace_id()}-{secrets.token_hex(8)}-01"}
 
 
 def _active_span_trace_id() -> str | None:

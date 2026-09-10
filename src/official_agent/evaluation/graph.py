@@ -48,6 +48,7 @@ class EvaluationState(TypedDict, total=False):
     hard_zero_reasons: dict[str, str]
     card: dict[str, Any]
     error: str | None
+    llm_usage: dict[str, int | None]  # #183:评分模型调用的 token 用量(job 观测面)
 
 
 def _as_field_texts(fields: list[dict[str, str]]) -> list[FieldText]:
@@ -163,6 +164,11 @@ async def llm_score(state: EvaluationState) -> dict:
             + ",".join(f["field_key"] for f in state["fields"])
         )
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])
+        um = getattr(resp, "usage_metadata", None)
+        if um:
+            from official_agent.state.conversation import extract_usage
+
+            state["llm_usage"] = extract_usage(um)
         raw = resp.content
         if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
             raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
@@ -250,17 +256,34 @@ async def run_evaluation(
     resume_id: int,
     cycle_id: int,
     weights: dict[str, float] | None = None,
+    usage_out: dict[str, int | None] | None = None,
+    correlation_id: str | None = None,
 ) -> dict:
-    """便捷入口:跑完整子图,返回卡 dict;LLM 失败抛 RuntimeError(B2 落 job 失败)。"""
+    """便捷入口:跑完整子图,返回卡 dict;LLM 失败抛 RuntimeError(B2 落 job 失败)。
+
+    #183:usage_out 给定时回填评分模型 token 用量;correlation_id 给定时
+    挂 Langfuse callbacks 并以 metadata.correlation_id 关联 trace(评测线
+    trace 面此前未接线,配置了也不产生 trace——评审 P2 修正)。"""
+    from official_agent.observability import langfuse_callbacks
+
     graph = build_evaluation_subgraph()
+    config: dict[str, Any] = {}
+    callbacks = langfuse_callbacks()
+    if callbacks:
+        config["callbacks"] = callbacks
+    if correlation_id:
+        config["metadata"] = {"correlation_id": correlation_id}
     final: EvaluationState = await graph.ainvoke(
         {
             "resume_id": resume_id,
             "cycle_id": cycle_id,
             "fields": fields,
             "weights": weights or {},
-        }
+        },
+        config=config,
     )
     if final.get("error") or not final.get("card"):
         raise RuntimeError(f"评分子图失败:{final.get('error')}")
+    if usage_out is not None:
+        usage_out.update(final.get("llm_usage") or {})
     return final["card"]

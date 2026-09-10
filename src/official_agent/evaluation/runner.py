@@ -301,6 +301,8 @@ class EvaluationRunner:
             reset_turn_trace_id(trace_token)
 
     async def _execute_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
+        from official_agent.observability import eval_job_trace_id
+
         started = time.monotonic()
         job = await asyncio.to_thread(evaluation.get_job, job_id)
         if job is None:
@@ -313,7 +315,7 @@ class EvaluationRunner:
                 cycle_id,
                 resume_id,
                 "started",
-                attempts=int(job.get("attempts") or 0),
+                attempts=int(job.get("attempts") or 0) + 1,
                 model=get_effective_settings().model_strong,
             )
             # 用户反馈:简历状态加「AI初筛中」(瞬态 6),结束后回落 2——
@@ -335,6 +337,7 @@ class EvaluationRunner:
                     )
                 # #176 出口契约:评分与出题两个模型入口共用这份脱敏后字段
                 fields = _mask_fields_for_model(fields, resume_id=resume_id)
+                scoring_usage: dict[str, int | None] = {}
                 card = await run_evaluation(
                     [
                         {
@@ -347,6 +350,8 @@ class EvaluationRunner:
                     ],
                     resume_id=resume_id,
                     cycle_id=cycle_id,
+                    usage_out=scoring_usage,
+                    correlation_id=eval_job_trace_id(job_id),
                 )
                 version = await asyncio.to_thread(
                     evaluation.save_scorecard,
@@ -363,6 +368,8 @@ class EvaluationRunner:
                     card_version=version,
                     duration_ms=int((time.monotonic() - t_eval) * 1000),
                     prompt_version=_prompt_version(),
+                    input_tokens=scoring_usage.get("input_tokens"),
+                    output_tokens=scoring_usage.get("output_tokens"),
                 )
                 # 调查 bundle → qbank:题库线失败不再静默(闸门6 qbank_status),
                 # job 记 succeeded + qbank_status=failed——评分卡有效,题库缺失
@@ -404,7 +411,7 @@ class EvaluationRunner:
                         qbank_version=qbank_version,
                         usage=usage_total,
                     )
-                except Exception:  # noqa: BLE001 — 题库线失败不拖垮评分卡
+                except Exception as qbank_exc:  # noqa: BLE001 — 题库线失败不拖垮评分卡
                     qbank_status = "failed"
                     _log_event(
                         job_id,
@@ -413,7 +420,7 @@ class EvaluationRunner:
                         "qbank_done",
                         status="failed",
                         duration_ms=int((time.monotonic() - t_qbank) * 1000),
-                        error_class="bundle_failed",
+                        error_class=type(qbank_exc).__name__,
                     )
                     logging.getLogger(__name__).warning(
                         "调查 bundle 落库失败(job=%s),job qbank_status=failed",
@@ -445,6 +452,12 @@ class EvaluationRunner:
                     "failed",
                     error=f"{type(exc).__name__}: {exc}"[:500],
                     qbank_status=qbank_status,
+                )
+                logging.getLogger(__name__).warning(
+                    "eval job failed job=%s error_class=%s",
+                    job_id,
+                    type(exc).__name__,
+                    exc_info=True,
                 )
                 _log_event(
                     job_id,
