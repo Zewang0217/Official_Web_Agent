@@ -32,6 +32,8 @@ class Dossier:
     degrade_reason: str = ""
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_hit_tokens: int | None = None  # D9/#154:prompt cache 命中
+    cache_miss_tokens: int | None = None
     paths: list[str] = field(default_factory=list)  # list_files 结构化清单(路径白名单校验)
     paths_truncated: bool = False
 
