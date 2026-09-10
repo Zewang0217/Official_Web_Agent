@@ -940,16 +940,23 @@ async def delete_my_session(
     user_id = identity.get("user_id")
     if user_id is None or resolve_thread(thread_id, user_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    deleted = await asyncio.to_thread(hard_delete_thread, thread_id, owner_user_id=int(user_id))
-    if not deleted:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    # #171 评审:正在流式中的会话拒绝删除(在途 generator 会复活已清数据)
+    async with _sessions_lock:
+        inflight = _sessions.get(thread_id)
+    if inflight is not None and inflight.turn_lock.locked():
+        raise HTTPException(status_code=409, detail="会话正在回复中,请稍后再删除")
+    # 顺序:先清数据面(checkpoint/对话日志),档案行最后——部分失败时
+    # 会话仍可重试删除,不产生"档案已删、数据面成孤儿"的死状态。
     try:
         await asyncio.to_thread(purge_thread_checkpoints, thread_id)
         await asyncio.to_thread(delete_thread_conversations, thread_id)
     except Exception as exc:  # noqa: BLE001 — 删除不完整必须如实暴露
         raise HTTPException(
-            status_code=500, detail="会话已删除但历史数据清理失败,请稍后重试或联系管理员"
+            status_code=500, detail="会话数据清理失败,请稍后重试或联系管理员"
         ) from exc
+    deleted = await asyncio.to_thread(hard_delete_thread, thread_id, owner_user_id=int(user_id))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="会话不存在")
     async with _sessions_lock:
         _sessions.pop(thread_id, None)
         _sessions_last_access.pop(thread_id, None)

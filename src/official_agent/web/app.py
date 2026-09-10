@@ -42,6 +42,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_agent_threads_table()
             conversation.ensure_conversation_table()
             config_store.ensure_config_table()
+            # #171 评审:纯 web 部署也要有审计面(管理员原文读取审计依赖)
+            from official_agent.state.audit import ensure_audit_table
+
+            ensure_audit_table()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
 

@@ -175,9 +175,41 @@ class _PiiMaskedLangfuseHandler:
         except Exception:  # noqa: BLE001 — 拷贝失败宁可不改,不污染原对象
             return message
 
+    def _mask_payload(self, value: Any, depth: int = 0) -> Any:
+        """递归掩 trace 载荷(#171 评审 P1):chain_start/end 的 inputs/outputs
+        会携带原始 messages 与图状态,只掩 chat_model/llm 入口挡不住。"""
+        from official_agent.security.pii import mask_pii
+
+        if depth > 6:
+            return value
+        if isinstance(value, str):
+            return mask_pii(value)
+        if isinstance(value, dict):
+            return {k: self._mask_payload(v, depth + 1) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            masked = [self._mask_payload(v, depth + 1) for v in value]
+            return type(value)(masked) if isinstance(value, tuple) else masked
+        content = getattr(value, "content", None)
+        if isinstance(content, str) and content:
+            masked = mask_pii(content)
+            if masked != content:
+                try:
+                    return value.model_copy(update={"content": masked})
+                except Exception:  # noqa: BLE001 — 拷贝失败放弃该条上报,不污染原对象
+                    return None
+        return value
+
     def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> Any:
         masked = [[self._masked_copy(m) for m in batch] for batch in messages]
         return self._inner.on_chat_model_start(serialized, masked, **kwargs)
+
+    def on_chain_start(self, serialized: Any, inputs: Any, **kwargs: Any) -> Any:
+        masked = self._mask_payload(inputs)
+        return self._inner.on_chain_start(serialized, masked, **kwargs)
+
+    def on_chain_end(self, outputs: Any, **kwargs: Any) -> Any:
+        masked = self._mask_payload(outputs)
+        return self._inner.on_chain_end(masked, **kwargs)
 
     def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> Any:
         from official_agent.security.pii import mask_pii

@@ -146,11 +146,15 @@ def test_delete_session_purges_all_store_faces(
 
 
 def test_delete_session_rejects_non_owner(client: TestClient, monkeypatch) -> None:
+    """非属主/不存在 → 404;patch 必须落在函数局部导入的源模块上。"""
+
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
     monkeypatch.setattr(routes, "resolve", _resolve)
-    monkeypatch.setattr(routes, "resolve_thread", lambda tid, uid: None)
+    import official_agent.state.threads as thread_store_mod
+
+    monkeypatch.setattr(thread_store_mod, "resolve_thread", lambda tid, uid: None)
     resp = client.delete(
         "/api/agent/sessions/web:u7:ghost01",
         headers={"Authorization": "Bearer tok"},
