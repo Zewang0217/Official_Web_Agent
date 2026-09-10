@@ -6,8 +6,6 @@ agent:monitor 一样走 JWT permission_codes 自校)。
 """
 
 import asyncio
-import contextlib
-import logging
 import secrets
 from typing import Annotated, Any
 
@@ -281,8 +279,9 @@ async def adopt_scorecard(
         )
     except BackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    # 投票已有外部副作用:先落审计再做卡态迁移(评审 P2:404 不丢双录后半)
-    with contextlib.suppress(Exception):
+    # ADR-0006(评审 P1):采纳是写操作,审计必须权威——先落审计再产生任何
+    # 副作用(投票/卡态迁移);审计失败 → 503,采纳不执行(可重试)。
+    try:
         await asyncio.to_thread(
             audit.write_audit,
             thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
@@ -296,8 +295,12 @@ async def adopt_scorecard(
                 "score": body.score,
             },
             decision=f"u{identity.get('user_id')}:adopt",
-            result="评审一票已投后端(终分=多人平均)",
+            result="评审采纳受理(先审计后投票,终分=多人平均)",
         )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="审计服务不可用,采纳未执行,请稍后重试"
+        ) from exc
 
     version = body.version
     if version is None:
@@ -307,17 +310,11 @@ async def adopt_scorecard(
         if row is None:
             raise HTTPException(status_code=404, detail="该候选暂无评分卡,无法采纳")
         version = int(row["card_version"])
-    changed = await asyncio.to_thread(
-        evaluation.set_scorecard_status,
-        body.resume_id,
-        body.cycle_id,
-        version,
-        "adopted",
-    )
-    if not changed:
-        raise HTTPException(status_code=404, detail="评分卡不存在")
+    # 卡态迁移同样先审计(ADR-0006):审计落了才置 adopted;失败 → 503,卡保持
+    # draft 可重试(docstring 语义不变)。
     try:
-        audit.write_audit(
+        await asyncio.to_thread(
+            audit.write_audit,
             thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
             acting_user_id=int(identity.get("user_id") or 0),
             channel="evaluation",
@@ -332,10 +329,19 @@ async def adopt_scorecard(
             decision=f"u{identity.get('user_id')}:adopt",
             result=f"评审采纳为一票(score={body.score});终分=多人平均",
         )
-    except Exception:  # noqa: BLE001 — 审计失败不影响采纳,但必须可见
-        logging.getLogger(__name__).warning(
-            "采纳审计写入失败(resume=%s)", body.resume_id, exc_info=True
-        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="审计服务不可用,采纳未执行,请稍后重试"
+        ) from exc
+    changed = await asyncio.to_thread(
+        evaluation.set_scorecard_status,
+        body.resume_id,
+        body.cycle_id,
+        version,
+        "adopted",
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="评分卡不存在")
     return {
         "resume_id": body.resume_id,
         "cycle_id": body.cycle_id,
@@ -359,17 +365,10 @@ async def reject_scorecard(
         if row is None:
             raise HTTPException(status_code=404, detail="该候选暂无评分卡,无法驳回")
         version = int(row["card_version"])
-    changed = await asyncio.to_thread(
-        evaluation.set_scorecard_status,
-        body.resume_id,
-        body.cycle_id,
-        version,
-        "rejected",
-    )
-    if not changed:
-        raise HTTPException(status_code=404, detail="评分卡不存在")
+    # ADR-0006:驳回是写操作,先落审计(失败 → 503,不迁移)。
     try:
-        audit.write_audit(
+        await asyncio.to_thread(
+            audit.write_audit,
             thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
             acting_user_id=int(identity.get("user_id") or 0),
             channel="evaluation",
@@ -383,10 +382,19 @@ async def reject_scorecard(
             decision=f"u{identity.get('user_id')}:reject",
             result="评审驳回 AI 参考分(可复评)",
         )
-    except Exception:  # noqa: BLE001 — 审计失败不影响驳回,但必须可见
-        logging.getLogger(__name__).warning(
-            "驳回审计写入失败(resume=%s)", body.resume_id, exc_info=True
-        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="审计服务不可用,驳回未执行,请稍后重试"
+        ) from exc
+    changed = await asyncio.to_thread(
+        evaluation.set_scorecard_status,
+        body.resume_id,
+        body.cycle_id,
+        version,
+        "rejected",
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="评分卡不存在")
     return {
         "resume_id": body.resume_id,
         "cycle_id": body.cycle_id,
