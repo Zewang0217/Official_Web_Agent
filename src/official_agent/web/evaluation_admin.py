@@ -132,7 +132,13 @@ async def get_qbank(
     envelope = row.get("envelope") or {}
     row = dict(row)
     # #153:v2 题组的可挑题扁平视图(UI 挑题不感知组内嵌套)
-    row["pickable"] = qbank_store.flatten_v2_pickable(envelope)
+    # #179:带 resume/cycle/版本生成稳定 ref_id,pick 时服务端权威绑定
+    row["pickable"] = qbank_store.flatten_v2_pickable(
+        envelope,
+        resume_id=int(row.get("resume_id") or resume_id),
+        cycle_id=int(row.get("cycle_id") or cycle_id),
+        qbank_version=int(row.get("qbank_version") or 0),
+    )
     return row
 
 
@@ -143,10 +149,22 @@ async def pick_questions(
         ResolvedIdentity, Depends(_require_any("interview:evaluate", "resume:audit"))
     ],
 ) -> dict[str, Any]:
-    """记录面试官实际勾选的题(pick log;候选人永不可见)。"""
+    """记录面试官实际勾选的题(pick log;候选人永不可见)。
+
+    #179:客户端引用只作"意图",落库的是服务端按当前题库解析出的权威
+    引用(含 ref_id/定位索引)——同文题、过期题库、伪造证据路径在解析
+    阶段直接 422,不再按题文反查串源。"""
+    try:
+        resolved = await asyncio.to_thread(
+            qbank_store.resolve_picks, body.resume_id, body.cycle_id, body.questions
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc
     picked = 0
     try:
-        for q in body.questions:
+        for q in resolved:
             await asyncio.to_thread(
                 qbank_store.record_pick,
                 resume_id=body.resume_id,

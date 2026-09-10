@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -38,8 +39,7 @@ def ensure_qbank_tables(conn: psycopg.Connection[dict[str, Any]]) -> None:
         """
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_qbank_resume "
-        "ON interview_qbank (resume_id, cycle_id)"
+        "CREATE INDEX IF NOT EXISTS idx_qbank_resume ON interview_qbank (resume_id, cycle_id)"
     )
     conn.execute(
         """
@@ -55,8 +55,7 @@ def ensure_qbank_tables(conn: psycopg.Connection[dict[str, Any]]) -> None:
         """
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_qbank_pick_resume "
-        "ON qbank_pick_log (resume_id, cycle_id)"
+        "CREATE INDEX IF NOT EXISTS idx_qbank_pick_resume ON qbank_pick_log (resume_id, cycle_id)"
     )
 
 
@@ -177,15 +176,49 @@ def list_picks(resume_id: int, cycle_id: int) -> list[dict[str, Any]]:
     return result
 
 
-def flatten_v2_pickable(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+def _ref_id(
+    ref: dict[str, Any],
+    resume_id: int | None,
+    cycle_id: int | None,
+    qbank_version: int | None,
+) -> str:
+    """稳定题引用 id(#179):sha256 前 16 位,输入含 resume/cycle/题库版本
+    + 组内定位(索引+角色+题文)。同文题靠索引区分,题库重跑换版本即换 id。"""
+    parts = [str(resume_id), str(cycle_id), str(qbank_version)]
+    for k in (
+        "group_index",
+        "group_kind",
+        "role",
+        "category",
+        "chain_index",
+        "layer_index",
+        "reserve_index",
+        "question_index",
+        "question",
+    ):
+        parts.append(str(ref.get(k, "")))
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def flatten_v2_pickable(
+    envelope: dict[str, Any],
+    *,
+    resume_id: int | None = None,
+    cycle_id: int | None = None,
+    qbank_version: int | None = None,
+) -> list[dict[str, Any]]:
     """v2 信封 → 可挑题扁平视图(#153):UI 挑题不用懂组内嵌套。
 
     每题带定位引用 question_ref(group_kind/role/category/chain_index/
-    layer_index/question),record_pick 原样落 qbank_pick_log。"""
+    layer_index/question),record_pick 原样落 qbank_pick_log。
+    #179:传入 resume_id/cycle_id/qbank_version 时每题附加稳定 ref_id,
+    pick 时服务端据此权威绑定(见 resolve_picks),杜绝按题文反查串源。"""
     out: list[dict[str, Any]] = []
 
     def _ref(**kw: Any) -> dict[str, Any]:
-        return kw
+        ref = dict(kw)
+        ref["ref_id"] = _ref_id(ref, resume_id, cycle_id, qbank_version)
+        return ref
 
     for gi, g in enumerate(envelope.get("groups", [])):
         kind_raw = g.get("group", "")
@@ -252,3 +285,67 @@ def flatten_v2_pickable(envelope: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             )
     return out
+
+
+def resolve_picks(
+    resume_id: int, cycle_id: int, submitted: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """把客户端提交的题引用解析为**当前题库**的权威引用(#179)。
+
+    服务端是题引用的唯一真源,客户端文本不可信(同文题按题文反查会串
+    来源)。匹配优先级:
+    1. ref_id 精确命中(端到端绑定,前端直用 pickable 条目即走此路);
+    2. 旧形状投影 {anchor, question, evidence_path?}:文本+anchor+证据
+       全部对上且**唯一**才收——同文多题必拒,逼客户端升级带索引/ref_id;
+    3. 其他形状:提交键值对全部与某权威条目相等(索引级绑定)。
+    返回权威条目列表(含 ref_id/索引);对不上抛 LookupError(含原因)。
+    """
+    row = latest_qbank(resume_id, cycle_id)
+    if row is None:
+        raise LookupError("该候选暂无预置题库")
+    entries = flatten_v2_pickable(
+        row.get("envelope") or {},
+        resume_id=resume_id,
+        cycle_id=cycle_id,
+        qbank_version=int(row.get("qbank_version") or 0),
+    )
+    resolved: list[dict[str, Any]] = []
+    for q in submitted:
+        if not isinstance(q, dict) or not str(q.get("question") or "").strip():
+            raise LookupError("勾选题缺少 question 文本,拒绝记录")
+        match = _match_entry(entries, q)
+        if match is None:
+            raise LookupError("勾选题与当前题库不符(题库可能已重跑更新),请刷新题库后重试")
+        resolved.append(match)
+    return resolved
+
+
+def _match_entry(entries: list[dict[str, Any]], q: dict[str, Any]) -> dict[str, Any] | None:
+    """单题匹配;无匹配或有歧义返回 None(歧义与未知的响应一致:拒)。"""
+    ref_id = str(q.get("ref_id") or "")
+    if ref_id:
+        by_id = [e for e in entries if e.get("ref_id") == ref_id]
+        if len(by_id) == 1:
+            return by_id[0]
+    if "anchor" in q:
+        # 旧形状投影(#179 之前的 frontend doPick):文本+anchor+证据全对上
+        cands = [
+            e
+            for e in entries
+            if str(e.get("question", "")) == str(q.get("question", ""))
+            and (
+                not str(q.get("anchor") or "") or str(e.get("category", "")) == str(q.get("anchor"))
+            )
+            and (
+                "evidence_path" not in q
+                or str(e.get("evidence_path", "")) == str(q.get("evidence_path"))
+            )
+        ]
+    else:
+        # 新形状:提交的每个键值都必须与权威条目相等(ref_id 已单独处理)
+        cands = [
+            e
+            for e in entries
+            if all(str(e.get(k, "")) == str(v) for k, v in q.items() if k != "ref_id")
+        ]
+    return cands[0] if len(cands) == 1 else None
