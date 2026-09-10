@@ -261,11 +261,14 @@ async def adopt_scorecard(
             raise HTTPException(status_code=404, detail="指定评分卡版本不存在")
         version = body.version
 
+    # 本次采纳的审计关联键:意图/结果两条记录共用,便于缺口配对(#180 评审)
+    audit_thread = f"eval:{body.cycle_id}:{secrets.token_hex(4)}"
+
     # 2) 意图审计(fail-closed):审计失败 → 503,采纳未执行,可安全重试
     try:
         await asyncio.to_thread(
             audit.write_audit,
-            thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
+            thread_id=audit_thread,
             acting_user_id=int(identity.get("user_id") or 0),
             channel="evaluation",
             agent="evaluation-reviewer",
@@ -281,29 +284,44 @@ async def adopt_scorecard(
     except Exception as exc:
         raise HTTPException(status_code=503, detail="审计服务不可用,采纳未执行,请稍后重试") from exc
 
-    # 3) 投票(评审本人令牌;upsert,重试覆盖同票)
-    client = await _gbc()
+    # 3) 投票(评审本人令牌)。后端 updateResumeScore 按 (resume, scorer)
+    #    upsert 一人一票(uk_resume_scorer,#180 评审已对后端源码证实),
+    #    超时后重试覆盖同票、不会双票。502 文案不谎报"未送达":超时路径
+    #    可能后端已落票,结果未知,如实说。
     try:
+        client = await _gbc()
         await client.put_as_user(
             f"/api/resumes/{body.resume_id}/score",
             json={"score": body.score},
             user_token=token,
         )
     except BackendError as exc:
-        raise HTTPException(status_code=502, detail="投票未送达后端,卡保持草稿,请重试") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"投票未确认送达后端({type(exc).__name__});若后端已落票,同一评审人"
+                "重试为覆盖同票。请重试或刷新查看实际状态"
+            ),
+        ) from exc
 
-    # 4) 卡态迁移:投票已落地,失败必须如实说"票已投"
-    changed = await asyncio.to_thread(
-        evaluation.set_scorecard_status,
-        body.resume_id,
-        body.cycle_id,
-        version,
-        "adopted",
-    )
+    # 4) 卡态迁移:投票已(至少可能已)落地,失败必须如实说"票已投"
+    try:
+        changed = await asyncio.to_thread(
+            evaluation.set_scorecard_status,
+            body.resume_id,
+            body.cycle_id,
+            version,
+            "adopted",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="投票已送达后端但卡态更新出错,请重试采纳(同一评审人重试为覆盖投票)",
+        ) from exc
     if not changed:
         raise HTTPException(
             status_code=500,
-            detail="投票已送达但卡态更新失败,请重试采纳(同一评审人重试为覆盖投票,不会双票)",
+            detail="投票已送达但卡态更新失败,请重试采纳(同一评审人重试为覆盖投票)",
         )
 
     # 5) 结果审计(fail-open 但可见):投票已不可撤销,不阻断采纳结果
@@ -311,7 +329,7 @@ async def adopt_scorecard(
     try:
         await asyncio.to_thread(
             audit.write_audit,
-            thread_id=f"eval:{body.cycle_id}:{secrets.token_hex(4)}",
+            thread_id=audit_thread,
             acting_user_id=int(identity.get("user_id") or 0),
             channel="evaluation",
             agent="evaluation-reviewer",
@@ -349,12 +367,16 @@ async def reject_scorecard(
     identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
 ) -> dict[str, Any]:
     """驳回:卡置 rejected(AI 参考分不采纳);可复评(run 生成新版本)。"""
-    version = body.version
-    if version is None:
-        row = await asyncio.to_thread(evaluation.latest_scorecard, body.resume_id, body.cycle_id)
-        if row is None:
+    # 验卡在前(#180 评审:显式传不存在 version 时不得先落审计再 404)
+    versions = await asyncio.to_thread(evaluation.list_scorecards, body.resume_id, body.cycle_id)
+    if body.version is None:
+        if not versions:
             raise HTTPException(status_code=404, detail="该候选暂无评分卡,无法驳回")
-        version = int(row["card_version"])
+        version = int(versions[0]["card_version"])
+    else:
+        if not any(int(v["card_version"]) == body.version for v in versions):
+            raise HTTPException(status_code=404, detail="指定评分卡版本不存在")
+        version = body.version
     # ADR-0006:驳回是写操作,先落审计(失败 → 503,不迁移)。
     try:
         await asyncio.to_thread(

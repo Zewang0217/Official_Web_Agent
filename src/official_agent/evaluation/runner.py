@@ -221,7 +221,13 @@ class EvaluationRunner:
             finally:
                 self._inflight.discard(job_id)
 
-        self._spawn(_guarded())
+        try:
+            self._spawn(_guarded())
+        except Exception:
+            # create_task 失败(如事件循环已关):登记必须回收,否则该 job
+            # 在本进程内永久无法再派发(#193 评审 P3)
+            self._inflight.discard(job_id)
+            raise
         return True
 
     async def submit(

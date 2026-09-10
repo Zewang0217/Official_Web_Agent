@@ -259,7 +259,7 @@ def test_adopt_backend_failure_keeps_draft(
         json={"resume_id": 9, "cycle_id": 2026, "score": 66},
     )
     assert resp.status_code == 502
-    assert "投票未送达" in resp.json()["detail"]
+    assert "投票未确认送达" in resp.json()["detail"]
     assert set_called == []  # 卡态未动
 
 
@@ -339,8 +339,8 @@ def test_reject_marks_rejected(client: TestClient, monkeypatch: pytest.MonkeyPat
     _install_resolve(monkeypatch, ["resume:audit"])
     monkeypatch.setattr(
         ea.evaluation,
-        "latest_scorecard",
-        lambda r, c: {"card_version": 2, "card": {}, "status": "draft"},
+        "list_scorecards",
+        lambda r, c: [{"card_version": 2, "status": "draft"}],
     )
     monkeypatch.setattr(
         ea.evaluation,
