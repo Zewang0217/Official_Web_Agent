@@ -160,11 +160,34 @@ class EvaluationRunner:
         self._sem = asyncio.Semaphore(_MAX_CONCURRENCY)
         # asyncio 只持任务弱引用:不保存会被 GC,job 静默卡死(B2 评审 P1)
         self._tasks: set[asyncio.Task] = set()
+        # #193 幂等派发:进程内在跑 job 登记——create_jobs 幂等复用活跃 job_id
+        # 后,submit/重试若再无条件派发会双跑同一简历。单 worker 语义;跨副本
+        # 由 DB 唯一活跃索引 + attempts 上限兜底(扩副本前需外置,见 #172 map)。
+        self._inflight: set[int] = set()
 
     def _spawn(self, coro) -> None:
         task = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _try_dispatch(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> bool:
+        """同 job 进程内只派发一次(#193);返回是否实际派发。
+
+        已在执行(含并发双击、重试双发、stale 恢复撞上在跑慢 job)→ 跳过;
+        执行完成由守卫协程的 finally 清理登记,之后再触发是合法复评。"""
+        if job_id in self._inflight:
+            logging.getLogger(__name__).info("job %s 已在执行,跳过重复派发(#193 幂等)", job_id)
+            return False
+        self._inflight.add(job_id)
+
+        async def _guarded() -> None:
+            try:
+                await self._run_job(job_id, cycle_id, trigger_user_id=trigger_user_id)
+            finally:
+                self._inflight.discard(job_id)
+
+        self._spawn(_guarded())
+        return True
 
     async def submit(
         self, cycle_id: int, items: list[TriggerItem], *, trigger_user_id: int
@@ -184,7 +207,7 @@ class EvaluationRunner:
         )
         # 先派发后审计:审计失败不得让已建的 job 永远 pending(B2 E2E 实测)
         for job_id in job_ids:
-            self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=trigger_user_id))
+            self._try_dispatch(job_id, cycle_id, trigger_user_id=trigger_user_id)
         try:
             await asyncio.to_thread(
                 audit.write_audit,
@@ -345,7 +368,7 @@ class EvaluationRunner:
         """失败 job 全部重回 pending 并重新派发;返回重派 job_ids。"""
         job_ids = await asyncio.to_thread(evaluation.requeue_failed, cycle_id)
         for job_id in job_ids:
-            self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=0))
+            self._try_dispatch(job_id, cycle_id, trigger_user_id=0)
         return job_ids
 
     async def retry_stale(self, cycle_id: int) -> list[int]:
@@ -355,7 +378,7 @@ class EvaluationRunner:
         """
         job_ids = await asyncio.to_thread(evaluation.requeue_stale, cycle_id)
         for job_id in job_ids:
-            self._spawn(self._run_job(job_id, cycle_id, trigger_user_id=0))
+            self._try_dispatch(job_id, cycle_id, trigger_user_id=0)
         return job_ids
 
     async def recover_stale_on_startup(self, *, older_than_minutes: int = 10) -> list[int]:
@@ -370,7 +393,7 @@ class EvaluationRunner:
             older_than_minutes=older_than_minutes,
         )
         for row in rows:
-            self._spawn(self._run_job(int(row["job_id"]), int(row["cycle_id"]), trigger_user_id=0))
+            self._try_dispatch(int(row["job_id"]), int(row["cycle_id"]), trigger_user_id=0)
         return [int(row["job_id"]) for row in rows]
 
 

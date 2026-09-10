@@ -217,9 +217,7 @@ async def test_recover_stale_dispatches_with_original_cycle(monkeypatch) -> None
     dispatched: list[tuple[int, int]] = []
     spawned: list = []
 
-    async def _record_run(
-        self, job_id: int, cycle_id: int, *, trigger_user_id: int
-    ) -> None:
+    async def _record_run(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
         dispatched.append((job_id, cycle_id))
 
     monkeypatch.setattr(ev_runner.evaluation, "requeue_stale_all_cycles", lambda **k: rows)
@@ -230,6 +228,57 @@ async def test_recover_stale_dispatches_with_original_cycle(monkeypatch) -> None
     await asyncio.gather(*spawned)
     assert job_ids == [7, 8]
     assert dispatched == [(7, 2026), (8, 2027)]
+
+
+@pytest.mark.asyncio
+async def test_try_dispatch_dedupes_until_completion(monkeypatch) -> None:
+    """#193:同 job 在跑期间重复派发被跳过;完成后清理登记,可合法复评。"""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _fake_run(self, job_id, cycle_id, *, trigger_user_id) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(EvaluationRunner, "_run_job", _fake_run)
+    runner = EvaluationRunner()
+    assert runner._try_dispatch(7, 2026, trigger_user_id=0) is True
+    assert runner._try_dispatch(7, 2026, trigger_user_id=0) is False
+    assert runner._try_dispatch(7, 2026, trigger_user_id=0) is False
+    await started.wait()
+    release.set()
+    await asyncio.gather(*list(runner._tasks))
+    assert 7 not in runner._inflight, "完成后登记必须清理"
+    assert runner._try_dispatch(7, 2026, trigger_user_id=0) is True
+    await asyncio.gather(*list(runner._tasks))
+
+
+@pytest.mark.asyncio
+async def test_submit_double_click_runs_job_once(monkeypatch) -> None:
+    """#193:create_jobs 幂等复用活跃 job_id 后,双击提交只执行一次。"""
+    runs: list[int] = []
+    release = asyncio.Event()
+
+    async def _record_run(self, job_id, cycle_id, *, trigger_user_id) -> None:
+        runs.append(job_id)
+        # 模拟慢 job:第二次提交到达时第一次仍在执行
+        await release.wait()
+
+    async def _authority(resume_id):
+        return {"resume_id": resume_id, "user_id": 42, "cycle_id": 2026}
+
+    monkeypatch.setattr(ev_runner, "fetch_resume_authority", _authority)
+    # 两次提交 DB 层都返回同一活跃 job(闸门2 SELECT-first 语义)
+    monkeypatch.setattr(ev_runner.evaluation, "create_jobs", lambda items, cycle_id: [7])
+    monkeypatch.setattr(ev_runner.audit, "write_audit", lambda **k: None)
+    monkeypatch.setattr(EvaluationRunner, "_run_job", _record_run)
+    runner = EvaluationRunner()
+    first = await runner.submit(2026, [ev_runner.TriggerItem(resume_id=99)], trigger_user_id=1)
+    second = await runner.submit(2026, [ev_runner.TriggerItem(resume_id=99)], trigger_user_id=1)
+    assert first == second == [7]
+    release.set()
+    await asyncio.gather(*list(runner._tasks))
+    assert runs == [7], f"双击只应执行一次,实际 {runs}"
 
 
 async def _spawn_probe(runner: EvaluationRunner) -> None:
