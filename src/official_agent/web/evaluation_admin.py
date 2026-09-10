@@ -221,14 +221,17 @@ async def evaluation_queue(
                 f"""
                 SELECT * FROM (
                     SELECT DISTINCT ON (resume_id)
-                        resume_id, card_version, status, hard_zero, total,
-                        prompt_version, created_at
-                    FROM evaluation_scorecard WHERE cycle_id = %s
+                        s.resume_id, s.card_version, s.status, s.hard_zero, s.total,
+                        s.prompt_version, s.created_at,
+                        (SELECT j.user_id FROM evaluation_job j
+                          WHERE j.resume_id = s.resume_id AND j.cycle_id = %s
+                          ORDER BY j.job_id DESC LIMIT 1) AS user_id
+                    FROM evaluation_scorecard s WHERE s.cycle_id = %s
                     ORDER BY resume_id, card_version DESC
                 ) latest {outer}
                 ORDER BY resume_id
                 """,
-                (cycle_id,),
+                (cycle_id, cycle_id),
             ).fetchall()
             return [dict(r) for r in rows]
 
